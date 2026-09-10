@@ -1162,47 +1162,95 @@ html, body, #root {
 }
 
 .overlay-segments-container {
-  display: inline;
-  line-height: 1.55;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  line-height: 1.6;
 }
 
-.overlay-segment {
-  color: var(--text-primary);
-  transition: color 0.3s ease;
-  display: inline;
+.overlay-segment-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 5px 6px;
+  transition: opacity 0.3s ease, transform 0.2s ease;
 }
 
-.overlay-segment.corrected {
-  color: var(--text-primary);
+.overlay-segment-row.faded {
+  opacity: 0.55;
 }
 
-.corrected-badge {
-  font-size: 11px;
-  margin-left: 3px;
-  margin-right: 4px;
-  opacity: 0.85;
-  display: inline-flex;
-  align-items: center;
-  vertical-align: middle;
-  color: var(--accent-color, #ffffff);
-  animation: sparkleFade 0.4s ease-out;
+.overlay-segment-row.current {
+  opacity: 1;
 }
 
-@keyframes sparkleFade {
-  from {
+/* Palavra individual animada */
+.overlay-word {
+  display: inline-block;
+  white-space: pre;
+  transition: color 0.2s ease, background-color 0.2s ease, transform 0.15s ease;
+}
+
+.overlay-word.word-enter {
+  animation: wordSlideIn 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.overlay-word.active-speaking {
+  color: var(--text-primary, #ffffff);
+  text-shadow: 0 0 10px rgba(255, 255, 255, 0.7);
+  font-weight: 600;
+}
+
+@keyframes wordSlideIn {
+  0% {
     opacity: 0;
-    transform: scale(0.6);
+    transform: translateY(3px) scale(0.95);
   }
-  to {
-    opacity: 0.85;
-    transform: scale(1);
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
   }
+}
+
+/* ==========================================================================
+   ESTILOS DE GRIFO / DESTAQUE DE PALAVRAS-CHAVE
+   ========================================================================== */
+
+/* Estilo 1: Marca-texto Suave */
+.overlay-word.highlight-marker {
+  color: var(--custom-highlight-color, #fde047);
+  background: transparent;
+  font-weight: 700;
+  text-shadow: 0 0 10px rgba(250, 204, 21, 0.45);
+}
+
+/* Estilo 2: Texto Colorido & Negrito */
+.overlay-word.highlight-colored_text {
+  color: var(--custom-highlight-color, #38bdf8);
+  background: transparent;
+  font-weight: 700;
+  text-shadow: 0 0 10px rgba(56, 189, 248, 0.5);
+}
+
+/* Estilo 3: Borda Inferior Luminosa (Underline Accent) */
+.overlay-word.highlight-underline {
+  border-bottom: 2px solid var(--custom-highlight-color, var(--accent-color, #a855f7));
+  color: var(--text-primary, #ffffff);
+  font-weight: 600;
+  padding-bottom: 1px;
+}
+
+.overlay-live-partial-container {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 5px 6px;
+  margin-top: 2px;
 }
 
 .overlay-live-partial {
-  color: var(--text-partial);
+  color: var(--text-partial, #e4e4e7);
   font-weight: 600;
-  margin-left: 4px;
   display: inline;
 }
 
@@ -1211,6 +1259,7 @@ html, body, #root {
   margin-left: 2px;
   animation: pulse 1s infinite;
   display: inline-block;
+  color: var(--accent-color, #ffffff);
 }
 
 @keyframes pulse {

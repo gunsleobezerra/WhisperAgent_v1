@@ -493,6 +493,8 @@ pub fn run() {
             audio::capture::open_recordings_folder,
             audio::capture::set_vad_sensitivity,
             audio::capture::get_vad_sensitivity,
+            audio::capture::set_audio_buffer_settings,
+            audio::capture::get_audio_buffer_settings,
             audio::stt::init_whisper_engine,
             audio::stt::set_whisper_model,
             audio::stt::get_current_whisper_model,

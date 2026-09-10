@@ -56,12 +56,57 @@ static MUTED_FLAG: AtomicBool = AtomicBool::new(false);
 // Limiar VAD padrão: 0.005 (ajustável pelo usuário na UI)
 static VAD_SENSITIVITY: Lazy<Arc<Mutex<f32>>> = Lazy::new(|| Arc::new(Mutex::new(0.005)));
 
+// Tamanho máximo do buffer contínuo em segundos (padrão: 12.0s, ajustável 3s a 30s)
+static MAX_BUFFER_SECONDS: Lazy<Arc<Mutex<f32>>> = Lazy::new(|| Arc::new(Mutex::new(12.0)));
+
+// Tempo de silêncio contínuo para fechar a sentença em segundos (padrão: 0.40s, ajustável 0.2s a 2.5s)
+static SILENCE_TIMEOUT_SECONDS: Lazy<Arc<Mutex<f32>>> = Lazy::new(|| Arc::new(Mutex::new(0.40)));
+
+// Intervalo de disparo da transcrição parcial ao vivo em segundos (padrão: 0.80s, ajustável 0.3s a 2.0s)
+static PARTIAL_INTERVAL_SECONDS: Lazy<Arc<Mutex<f32>>> = Lazy::new(|| Arc::new(Mutex::new(0.80)));
+
 // Guarda o último segmento de áudio completo (16kHz mono) processado pelo Whisper
 static LAST_CAPTURED_AUDIO: Lazy<Arc<Mutex<Option<(Vec<f32>, AudioRecordingStats)>>>> =
     Lazy::new(|| Arc::new(Mutex::new(None)));
 
 pub fn set_audio_mute(muted: bool) {
     MUTED_FLAG.store(muted, Ordering::SeqCst);
+}
+
+#[tauri::command]
+pub fn set_audio_buffer_settings(
+    max_buffer_seconds: Option<f32>,
+    silence_timeout_seconds: Option<f32>,
+    partial_interval_seconds: Option<f32>,
+) -> Result<(), String> {
+    if let Some(buf) = max_buffer_seconds {
+        let clamped = buf.clamp(3.0, 30.0);
+        *MAX_BUFFER_SECONDS.lock().unwrap() = clamped;
+        log::info!("[Audio Backend] Buffer máximo ajustado para: {:.2}s", clamped);
+    }
+    if let Some(sil) = silence_timeout_seconds {
+        let clamped = sil.clamp(0.2, 2.5);
+        *SILENCE_TIMEOUT_SECONDS.lock().unwrap() = clamped;
+        log::info!("[Audio Backend] Tempo de silêncio VAD ajustado para: {:.2}s", clamped);
+    }
+    if let Some(part) = partial_interval_seconds {
+        let clamped = part.clamp(0.3, 2.0);
+        *PARTIAL_INTERVAL_SECONDS.lock().unwrap() = clamped;
+        log::info!("[Audio Backend] Intervalo de parcial HUD ajustado para: {:.2}s", clamped);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_audio_buffer_settings() -> serde_json::Value {
+    let buf = *MAX_BUFFER_SECONDS.lock().unwrap();
+    let sil = *SILENCE_TIMEOUT_SECONDS.lock().unwrap();
+    let part = *PARTIAL_INTERVAL_SECONDS.lock().unwrap();
+    serde_json::json!({
+        "max_buffer_seconds": buf,
+        "silence_timeout_seconds": sil,
+        "partial_interval_seconds": part,
+    })
 }
 
 #[tauri::command]
@@ -452,14 +497,21 @@ pub async fn start_audio_capture(
                         silence_samples += mono_data.len();
                     }
 
-                    // A cada ~800ms de fala contínua, decodifica pequena fatia recente (~2s) para HUD ao vivo
-                    let partial_trigger_samples = (rate * 0.8) as usize;
+                    let dynamic_partial_sec = *PARTIAL_INTERVAL_SECONDS.lock().unwrap();
+                    let dynamic_silence_sec = *SILENCE_TIMEOUT_SECONDS.lock().unwrap();
+                    let dynamic_max_buf_sec = *MAX_BUFFER_SECONDS.lock().unwrap();
+
+                    let silence_threshold_samples = (rate * dynamic_silence_sec) as usize;
+                    let partial_trigger_samples = (rate * dynamic_partial_sec) as usize;
+                    let max_continuous_samples = (rate * dynamic_max_buf_sec) as usize;
+
+                    // A cada intervalo configurado de fala contínua, decodifica buffer cumulativo para HUD ao vivo
                     if samples_since_partial >= partial_trigger_samples && speech_buffer.len() >= partial_trigger_samples {
                         samples_since_partial = 0;
 
                         if !is_transcribing.swap(true, Ordering::SeqCst) {
-                            // Envia no máximo os últimos 2.0 segundos (em vez de 6s) para decodificação ultra rápida em CPU
-                            let max_partial_samples = (rate * 2.0) as usize;
+                            // Envia o buffer completo da fala atual (respeitando o buffer máximo)
+                            let max_partial_samples = max_continuous_samples;
                             let start_idx = if speech_buffer.len() > max_partial_samples {
                                 speech_buffer.len() - max_partial_samples
                             } else {
@@ -495,8 +547,7 @@ pub async fn start_audio_capture(
                         }
                     }
 
-                    // Prevenção de buffer infinito em áudios longos contínuos (>12 segundos)
-                    let max_continuous_samples = (rate * 12.0) as usize;
+                    // Prevenção de buffer infinito em áudios longos contínuos (> buffer máximo configurado)
                     if speech_buffer.len() > max_continuous_samples {
                         let continuous_slice = speech_buffer.clone();
                         let emit_handle = callback_handle.clone();
@@ -538,15 +589,13 @@ pub async fn start_audio_capture(
                             }
                         });
 
-                        // Mantém sobreposição de 1.5s para continuidade
-                        let overlap_samples = (rate * 1.5) as usize;
-                        let keep_idx = speech_buffer.len() - overlap_samples;
-                        speech_buffer = speech_buffer[keep_idx..].to_vec();
+                        // Esvazia o buffer de fala para que o silêncio seguinte não emita a mesma frase repetida
+                        speech_buffer.clear();
                         samples_since_partial = 0;
                         silence_samples = 0;
                     }
 
-                    // Se atingiu o silêncio contínuo necessário para fechar a sentença (~550ms)
+                    // Se atingiu o silêncio contínuo necessário para fechar a sentença
                     if silence_samples >= silence_threshold_samples {
                         is_speaking = false;
                         silence_samples = 0;

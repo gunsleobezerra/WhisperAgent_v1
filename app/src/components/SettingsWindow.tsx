@@ -64,6 +64,11 @@ import {
   PopupSettingsConfig,
 } from '../utils/popupSettings';
 import {
+  getStoredOverlayDisplaySettings,
+  saveAndBroadcastOverlayDisplaySettings,
+  OverlayDisplaySettings,
+} from '../utils/overlayDisplaySettings';
+import {
   playPopupSound,
   SOUND_PRESETS,
   PopupSoundTone,
@@ -491,6 +496,60 @@ export function SettingsWindow() {
     const saved = localStorage.getItem('overlay_font_size');
     return saved ? Math.max(14, Math.min(36, Number(saved))) : 18;
   });
+  const [displaySettings, setDisplaySettings] = useState<OverlayDisplaySettings>(getStoredOverlayDisplaySettings);
+  const [newKeywordInput, setNewKeywordInput] = useState('');
+
+  // Configurações Avançadas de Buffer de Áudio & Latência
+  const [maxBufferSeconds, setMaxBufferSeconds] = useState<number>(12.0);
+  const [silenceTimeoutSeconds, setSilenceTimeoutSeconds] = useState<number>(0.4);
+  const [partialIntervalSeconds, setPartialIntervalSeconds] = useState<number>(0.8);
+
+  const handleSaveAudioBufferSettings = async (
+    maxBuf?: number,
+    silTimeout?: number,
+    partInterval?: number
+  ) => {
+    const nextMax = maxBuf !== undefined ? maxBuf : maxBufferSeconds;
+    const nextSil = silTimeout !== undefined ? silTimeout : silenceTimeoutSeconds;
+    const nextPart = partInterval !== undefined ? partInterval : partialIntervalSeconds;
+    if (maxBuf !== undefined) setMaxBufferSeconds(maxBuf);
+    if (silTimeout !== undefined) setSilenceTimeoutSeconds(silTimeout);
+    if (partInterval !== undefined) setPartialIntervalSeconds(partInterval);
+
+    try {
+      await invoke('set_audio_buffer_settings', {
+        maxBufferSeconds: nextMax,
+        silenceTimeoutSeconds: nextSil,
+        partialIntervalSeconds: nextPart,
+      });
+    } catch (e) {
+      console.warn('Erro ao salvar audio buffer settings:', e);
+    }
+  };
+
+  const updateDisplaySetting = <K extends keyof OverlayDisplaySettings>(
+    key: K,
+    value: OverlayDisplaySettings[K]
+  ) => {
+    const updated = { ...displaySettings, [key]: value };
+    setDisplaySettings(updated);
+    saveAndBroadcastOverlayDisplaySettings(updated);
+  };
+
+  const handleAddKeyword = () => {
+    const term = newKeywordInput.trim();
+    if (!term) return;
+    if (!displaySettings.customKeywords.includes(term.toLowerCase())) {
+      const updatedList = [...displaySettings.customKeywords, term.toLowerCase()];
+      updateDisplaySetting('customKeywords', updatedList);
+    }
+    setNewKeywordInput('');
+  };
+
+  const handleRemoveKeyword = (term: string) => {
+    const updatedList = displaySettings.customKeywords.filter((k) => k !== term);
+    updateDisplaySetting('customKeywords', updatedList);
+  };
 
   // Configurações de IA (BYOK)
   const [byokEndpoint, setByokEndpoint] = useState<string>(() => localStorage.getItem('byok_endpoint') ?? '');
@@ -663,6 +722,20 @@ export function SettingsWindow() {
 
       invoke<AudioRecordingStats>('get_audio_recording_stats')
         .then((stats) => setAudioStats(stats))
+        .catch(() => {});
+
+      invoke<{
+        max_buffer_seconds: number;
+        silence_timeout_seconds: number;
+        partial_interval_seconds: number;
+      }>('get_audio_buffer_settings')
+        .then((bufSettings) => {
+          if (bufSettings) {
+            if (bufSettings.max_buffer_seconds) setMaxBufferSeconds(bufSettings.max_buffer_seconds);
+            if (bufSettings.silence_timeout_seconds) setSilenceTimeoutSeconds(bufSettings.silence_timeout_seconds);
+            if (bufSettings.partial_interval_seconds) setPartialIntervalSeconds(bufSettings.partial_interval_seconds);
+          }
+        })
         .catch(() => {});
     } catch (e) {
       console.warn('Ambiente web (sem Tauri) detectado:', e);
@@ -2457,6 +2530,450 @@ export function SettingsWindow() {
                   </span>
                   <span className="preset-btn-sub">360 × 500 px (modo coluna)</span>
                 </button>
+              </div>
+            </div>
+
+            {/* ==========================================================================
+                EXIBIÇÃO DE TEXTO & GRIFO DE PALAVRAS-CHAVE (TELEPROMPTER & KEYWORDS)
+               ========================================================================== */}
+            <div className="form-group" style={{ marginTop: '20px' }}>
+              <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <Type size={14} color="var(--accent-color)" />
+                Exibição Fluida e Grifo de Palavras-Chave
+              </label>
+
+              {/* Animação Palavra por Palavra */}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px', background: 'var(--bg-secondary)', padding: '10px 14px', borderRadius: '8px' }}>
+                <div>
+                  <strong style={{ fontSize: '12px', display: 'block' }}>Efeito Palavra por Palavra (Teleprompter)</strong>
+                  <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
+                    Exibe as palavras conforme surgem suavemente, com destaque para a fala ativa
+                  </span>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={displaySettings.wordByWordAnimation}
+                  onChange={(e) => updateDisplaySetting('wordByWordAnimation', e.target.checked)}
+                  style={{ width: '18px', height: '18px', cursor: 'pointer', accentColor: 'var(--accent-color)' }}
+                />
+              </div>
+
+              {/* Limite de Frases Visíveis */}
+              <div style={{ marginBottom: '16px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: 'var(--text-secondary)', marginBottom: '4px' }}>
+                  <span>Frases Visíveis Simultâneas (Evita Acúmulo Confuso)</span>
+                  <span style={{ fontWeight: 700, color: 'var(--accent-color)' }}>
+                    {displaySettings.maxLinesVisible === 0 ? 'Ilimitado (Histórico total)' : `${displaySettings.maxLinesVisible} frases`}
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  className="form-range"
+                  min="1"
+                  max="6"
+                  step="1"
+                  value={displaySettings.maxLinesVisible}
+                  onChange={(e) => updateDisplaySetting('maxLinesVisible', Number(e.target.value))}
+                />
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                  <span>1 (Ultra focado)</span>
+                  <span>3 (Recomendado)</span>
+                  <span>6 (Mais contexto)</span>
+                </div>
+              </div>
+
+              {/* Ativação do Grifo */}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px', background: 'var(--bg-secondary)', padding: '10px 14px', borderRadius: '8px' }}>
+                <div>
+                  <strong style={{ fontSize: '12px', display: 'block' }}>Grifar Palavras-Chave</strong>
+                  <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
+                    Realça termos relevantes visualmente durante a leitura
+                  </span>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={displaySettings.highlightEnabled}
+                  onChange={(e) => updateDisplaySetting('highlightEnabled', e.target.checked)}
+                  style={{ width: '18px', height: '18px', cursor: 'pointer', accentColor: 'var(--accent-color)' }}
+                />
+              </div>
+
+              {displaySettings.highlightEnabled && (
+                <div style={{ paddingLeft: '4px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                  {/* Modo de Grifo (3 MODOS) */}
+                  <div>
+                    <label className="form-label" style={{ fontSize: '11px', marginBottom: '6px' }}>
+                      Modo de Detecção de Palavras-Chave:
+                    </label>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '8px' }}>
+                      <button
+                        type="button"
+                        className={`preset-btn ${displaySettings.highlightMode === 'auto' ? 'active' : ''}`}
+                        onClick={() => updateDisplaySetting('highlightMode', 'auto')}
+                      >
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', fontWeight: 600 }}>
+                          <Sparkles size={12} /> Modo 1: Automático
+                        </span>
+                        <span className="preset-btn-sub">Números, siglas e palavras de alto valor semântico</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        className={`preset-btn ${displaySettings.highlightMode === 'custom' ? 'active' : ''}`}
+                        onClick={() => updateDisplaySetting('highlightMode', 'custom')}
+                      >
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', fontWeight: 600 }}>
+                          <Type size={12} /> Modo 2: Lista Personalizada
+                        </span>
+                        <span className="preset-btn-sub">Termos específicos definidos por você</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        className={`preset-btn ${displaySettings.highlightMode === 'llm' ? 'active' : ''}`}
+                        onClick={() => updateDisplaySetting('highlightMode', 'llm')}
+                      >
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', fontWeight: 600 }}>
+                          <Bot size={12} /> Modo 3: Inteligência Artificial
+                        </span>
+                        <span className="preset-btn-sub">Conceitos centrais identificados pela IA</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        className={`preset-btn ${displaySettings.highlightMode === 'hybrid' ? 'active' : ''}`}
+                        onClick={() => updateDisplaySetting('highlightMode', 'hybrid')}
+                      >
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', fontWeight: 600 }}>
+                          <Layers size={12} /> Híbrido (Todos)
+                        </span>
+                        <span className="preset-btn-sub">Automático + Lista Própria + IA</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Estilo Visual do Grifo */}
+                  <div>
+                    <label className="form-label" style={{ fontSize: '11px', marginBottom: '6px' }}>
+                      Estilo Visual do Grifo:
+                    </label>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px' }}>
+                      <button
+                        type="button"
+                        className={`preset-btn ${displaySettings.highlightStyle === 'marker' ? 'active' : ''}`}
+                        onClick={() => updateDisplaySetting('highlightStyle', 'marker')}
+                      >
+                        <span style={{ color: displaySettings.highlightColor || '#facc15', textShadow: `0 0 8px ${displaySettings.highlightColor || '#facc15'}66`, fontSize: '11px', fontWeight: 700 }}>
+                          Brilho Sutil
+                        </span>
+                        <span className="preset-btn-sub">Cor personalizada com leve aura</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        className={`preset-btn ${displaySettings.highlightStyle === 'colored_text' ? 'active' : ''}`}
+                        onClick={() => updateDisplaySetting('highlightStyle', 'colored_text')}
+                      >
+                        <span style={{ color: displaySettings.highlightColor || '#38bdf8', fontSize: '11px', fontWeight: 700 }}>
+                          Texto Colorido
+                        </span>
+                        <span className="preset-btn-sub">Letras na cor escolhida</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        className={`preset-btn ${displaySettings.highlightStyle === 'underline' ? 'active' : ''}`}
+                        onClick={() => updateDisplaySetting('highlightStyle', 'underline')}
+                      >
+                        <span style={{ borderBottom: `2px solid ${displaySettings.highlightColor || 'var(--accent-color)'}`, fontSize: '11px', fontWeight: 700 }}>
+                          Sublinhado
+                        </span>
+                        <span className="preset-btn-sub">Borda luminosa inferior</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Cor do Grifo das Letras / Palavras */}
+                  <div style={{ background: 'var(--bg-secondary)', padding: '12px', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                      <label className="form-label" style={{ fontSize: '11px', marginBottom: 0, fontWeight: 600 }}>
+                        Cor do Grifo das Letras / Palavras:
+                      </label>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <span style={{ fontSize: '11px', fontFamily: 'monospace', color: displaySettings.highlightColor || '#38bdf8' }}>
+                          {displaySettings.highlightColor || '#38bdf8'}
+                        </span>
+                        <input
+                          type="color"
+                          value={displaySettings.highlightColor || '#38bdf8'}
+                          onChange={(e) => updateDisplaySetting('highlightColor', e.target.value)}
+                          style={{
+                            width: '28px',
+                            height: '24px',
+                            border: '1px solid var(--border-color)',
+                            borderRadius: '4px',
+                            cursor: 'pointer',
+                            background: 'transparent',
+                            padding: 0,
+                          }}
+                          title="Escolher cor personalizada"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Paletas / Presets de Cores Rápidas */}
+                    <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                      {[
+                        { label: 'Ciano Neon', color: '#38bdf8' },
+                        { label: 'Dourado Quente', color: '#facc15' },
+                        { label: 'Rosa Pink', color: '#ec4899' },
+                        { label: 'Verde Esmeralda', color: '#4ade80' },
+                        { label: 'Roxo Elétrico', color: '#a855f7' },
+                        { label: 'Laranja Chama', color: '#fb923c' },
+                        { label: 'Branco Puro', color: '#ffffff' },
+                      ].map((preset) => {
+                        const isSelected = (displaySettings.highlightColor || '#38bdf8').toLowerCase() === preset.color.toLowerCase();
+                        return (
+                          <button
+                            key={preset.color}
+                            type="button"
+                            onClick={() => updateDisplaySetting('highlightColor', preset.color)}
+                            style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '5px',
+                              padding: '3px 8px',
+                              borderRadius: '12px',
+                              fontSize: '10px',
+                              cursor: 'pointer',
+                              background: isSelected ? 'rgba(255, 255, 255, 0.15)' : 'rgba(255, 255, 255, 0.04)',
+                              border: isSelected ? `1.5px solid ${preset.color}` : '1px solid var(--border-color)',
+                              color: 'var(--text-primary)',
+                            }}
+                          >
+                            <span
+                              style={{
+                                width: '10px',
+                                height: '10px',
+                                borderRadius: '50%',
+                                backgroundColor: preset.color,
+                                boxShadow: `0 0 6px ${preset.color}88`,
+                              }}
+                            />
+                            {preset.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Campo de Palavras Personalizadas (quando modo custom ou hybrid) */}
+                  {(displaySettings.highlightMode === 'custom' || displaySettings.highlightMode === 'hybrid') && (
+                    <div style={{ background: 'var(--bg-secondary)', padding: '12px', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
+                      <label className="form-label" style={{ fontSize: '11px', marginBottom: '6px' }}>
+                        Dicionário de Termos de Interesse (Modo 2):
+                      </label>
+                      <div style={{ display: 'flex', gap: '6px', marginBottom: '8px' }}>
+                        <input
+                          type="text"
+                          className="form-input"
+                          placeholder="Digite uma palavra ou expressão (ex: liminar, artigo 5, bug)..."
+                          value={newKeywordInput}
+                          onChange={(e) => setNewKeywordInput(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              handleAddKeyword();
+                            }
+                          }}
+                          style={{ flex: 1, fontSize: '12px' }}
+                        />
+                        <button
+                          type="button"
+                          className="btn btn-secondary"
+                          onClick={handleAddKeyword}
+                          style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '12px', padding: '6px 12px' }}
+                        >
+                          <Plus size={13} /> Adicionar
+                        </button>
+                      </div>
+
+                      {/* Lista de tags */}
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                        {displaySettings.customKeywords.map((kw) => (
+                          <span
+                            key={kw}
+                            style={{
+                              background: 'var(--bg-tertiary, rgba(255,255,255,0.08))',
+                              border: '1px solid var(--border-color)',
+                              borderRadius: '14px',
+                              padding: '2px 8px',
+                              fontSize: '11px',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '5px',
+                            }}
+                          >
+                            {kw}
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveKeyword(kw)}
+                              style={{
+                                background: 'transparent',
+                                border: 'none',
+                                color: 'var(--text-secondary)',
+                                cursor: 'pointer',
+                                padding: 0,
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                              }}
+                              title="Remover"
+                            >
+                              <X size={11} />
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* ==========================================================================
+                CONFIGURAÇÕES AVANÇADAS: BUFFER DE FALA & TEMPOS DE REQUISIÇÃO AO LLM
+               ========================================================================== */}
+            <div className="form-group" style={{ marginTop: '24px' }}>
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  marginBottom: '10px',
+                  paddingBottom: '6px',
+                  borderBottom: '1px solid var(--border-color)',
+                }}
+              >
+                <Clock size={15} color="var(--accent-color)" />
+                <span style={{ fontSize: '13px', fontWeight: 700, color: 'var(--text-primary)' }}>
+                  Configurações Avançadas de Buffer & Latência
+                </span>
+              </div>
+
+              {/* Slider 1: Tamanho do Buffer Máximo */}
+              <div style={{ marginBottom: '14px', background: 'var(--bg-secondary)', padding: '12px', borderRadius: '8px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                  <label className="form-label" style={{ marginBottom: 0, fontSize: '12px' }}>
+                    Tamanho Máximo do Buffer de Fala Contínua
+                  </label>
+                  <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--accent-color)', fontFamily: 'monospace' }}>
+                    {maxBufferSeconds.toFixed(1)}s
+                  </span>
+                </div>
+                <p style={{ fontSize: '11px', color: 'var(--text-secondary)', margin: '0 0 8px 0' }}>
+                  Tempo máximo acumulado de áudio antes de forçar a emissão e limpeza do buffer.
+                </p>
+                <input
+                  type="range"
+                  className="form-range"
+                  min="3"
+                  max="30"
+                  step="1"
+                  value={maxBufferSeconds}
+                  onChange={(e) => handleSaveAudioBufferSettings(Number(e.target.value), undefined, undefined)}
+                />
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                  <span>3s (Ultra Curto)</span>
+                  <span>12s (Padrão Recomendado)</span>
+                  <span>30s (Muito Longo)</span>
+                </div>
+              </div>
+
+              {/* Slider 2: Silêncio para Fechar Sentença */}
+              <div style={{ marginBottom: '14px', background: 'var(--bg-secondary)', padding: '12px', borderRadius: '8px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                  <label className="form-label" style={{ marginBottom: 0, fontSize: '12px' }}>
+                    Tempo de Silêncio para Fechar Sentença (VAD)
+                  </label>
+                  <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--accent-color)', fontFamily: 'monospace' }}>
+                    {silenceTimeoutSeconds.toFixed(2)}s
+                  </span>
+                </div>
+                <p style={{ fontSize: '11px', color: 'var(--text-secondary)', margin: '0 0 8px 0' }}>
+                  Duração da pausa de fala necessária para considerar a frase finalizada e consolidar a transcrição.
+                </p>
+                <input
+                  type="range"
+                  className="form-range"
+                  min="0.2"
+                  max="2.5"
+                  step="0.05"
+                  value={silenceTimeoutSeconds}
+                  onChange={(e) => handleSaveAudioBufferSettings(undefined, Number(e.target.value), undefined)}
+                />
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                  <span>0.20s (Corte Rápido)</span>
+                  <span>0.40s (Padrão Fluido)</span>
+                  <span>2.50s (Pausa Longa)</span>
+                </div>
+              </div>
+
+              {/* Slider 3: Intervalo de Atualização da Parcial no HUD */}
+              <div style={{ marginBottom: '14px', background: 'var(--bg-secondary)', padding: '12px', borderRadius: '8px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                  <label className="form-label" style={{ marginBottom: 0, fontSize: '12px' }}>
+                    Intervalo de Atualização Parcial ao Vivo
+                  </label>
+                  <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--accent-color)', fontFamily: 'monospace' }}>
+                    {partialIntervalSeconds.toFixed(2)}s
+                  </span>
+                </div>
+                <p style={{ fontSize: '11px', color: 'var(--text-secondary)', margin: '0 0 8px 0' }}>
+                  Frequência com que o texto em andamento é enviado ao overlay enquanto você ainda está falando.
+                </p>
+                <input
+                  type="range"
+                  className="form-range"
+                  min="0.3"
+                  max="2.0"
+                  step="0.1"
+                  value={partialIntervalSeconds}
+                  onChange={(e) => handleSaveAudioBufferSettings(undefined, undefined, Number(e.target.value))}
+                />
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                  <span>0.30s (Instantâneo)</span>
+                  <span>0.80s (Equilibrado)</span>
+                  <span>2.00s (Econômico)</span>
+                </div>
+              </div>
+
+              {/* Slider 4: Tempo de Silêncio para Enviar ao LLM */}
+              <div style={{ marginBottom: '14px', background: 'var(--bg-secondary)', padding: '12px', borderRadius: '8px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                  <label className="form-label" style={{ marginBottom: 0, fontSize: '12px' }}>
+                    Tempo de Silêncio para Mandar Requisição ao LLM / IA
+                  </label>
+                  <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--accent-color)', fontFamily: 'monospace' }}>
+                    {(displaySettings.llmSilenceSeconds || 1.0).toFixed(1)}s
+                  </span>
+                </div>
+                <p style={{ fontSize: '11px', color: 'var(--text-secondary)', margin: '0 0 8px 0' }}>
+                  Tempo de silêncio após o término de uma sentença antes de acionar a análise da inteligência artificial.
+                </p>
+                <input
+                  type="range"
+                  className="form-range"
+                  min="0.5"
+                  max="5.0"
+                  step="0.1"
+                  value={displaySettings.llmSilenceSeconds || 1.0}
+                  onChange={(e) => updateDisplaySetting('llmSilenceSeconds', Number(e.target.value))}
+                />
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                  <span>0.5s (Imediato)</span>
+                  <span>1.0s (Padrão)</span>
+                  <span>5.0s (Aguardar Pensamento)</span>
+                </div>
               </div>
             </div>
 

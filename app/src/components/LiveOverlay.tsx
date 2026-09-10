@@ -24,6 +24,12 @@ import { getStoredPersonas, getStoredActivePersonaId, cleanPersonaName, DEFAULT_
 import { getStoredPopupSettings, PopupSettingsConfig } from '../utils/popupSettings';
 import { playPopupSound } from '../utils/audioNotification';
 import { MarkdownViewer } from './MarkdownViewer';
+import {
+  getStoredOverlayDisplaySettings,
+  OverlayDisplaySettings,
+  isWordKeyword,
+  PORTUGUESE_STOPWORDS,
+} from '../utils/overlayDisplaySettings';
 
 interface LlmActionTriggered {
   action_id: string;
@@ -90,6 +96,52 @@ function renderPersonaIcon(id: string) {
   }
 }
 
+/**
+ * Algoritmo de Fixação Progressiva de Prefixo (Prefix Stability):
+ * Mantém as palavras anteriores travadas e soma as novas palavras conforme chegam,
+ * impedindo que a frase inteira fique pulando ou mudando de sentido.
+ */
+function mergeStreamingText(existing: string, incoming: string): string {
+  const cleanExisting = existing.trim();
+  const cleanIncoming = incoming.trim();
+
+  if (!cleanExisting) return cleanIncoming;
+  if (!cleanIncoming) return cleanExisting;
+
+  // 1. Se o novo texto é idêntico ou já está contido no existente, ignora
+  if (cleanExisting.toLowerCase().includes(cleanIncoming.toLowerCase())) {
+    return cleanExisting;
+  }
+
+  // 2. Se o novo texto é continuação direta do existente (começa com o existente)
+  if (cleanIncoming.toLowerCase().startsWith(cleanExisting.toLowerCase())) {
+    return cleanIncoming;
+  }
+
+  // 3. Procura sobreposição de sufixo do existente com prefixo do incoming (overlap)
+  const existingWords = cleanExisting.split(/\s+/);
+  const incomingWords = cleanIncoming.split(/\s+/);
+
+  const maxCheck = Math.min(existingWords.length, incomingWords.length);
+  for (let len = maxCheck; len >= 1; len--) {
+    const existingSlice = existingWords.slice(-len).map((w) => w.toLowerCase()).join(' ');
+    const incomingSlice = incomingWords.slice(0, len).map((w) => w.toLowerCase()).join(' ');
+
+    if (existingSlice === incomingSlice) {
+      const newWords = incomingWords.slice(len);
+      if (newWords.length === 0) return cleanExisting;
+      return `${cleanExisting} ${newWords.join(' ')}`;
+    }
+  }
+
+  // 4. Se o incoming é uma frase nova ou mais longa e coerente, atualiza para ela
+  if (incomingWords.length >= existingWords.length) {
+    return cleanIncoming;
+  }
+
+  return cleanExisting;
+}
+
 export function LiveOverlay() {
   // Histórico acumulado de frases finalizadas na janela
   const [segments, setSegments] = useState<TranscriptionSegment[]>([]);
@@ -118,6 +170,8 @@ export function LiveOverlay() {
 
   // Configurações de popups e ação embutida
   const [popupSettings, setPopupSettings] = useState<PopupSettingsConfig>(getStoredPopupSettings);
+  const [displaySettings, setDisplaySettings] = useState<OverlayDisplaySettings>(getStoredOverlayDisplaySettings);
+  const [llmKeywordsMap, setLlmKeywordsMap] = useState<Record<string, Set<string>>>({});
   const [inlineAction, setInlineAction] = useState<LlmActionTriggered | null>(null);
   const [inlineCopied, setInlineCopied] = useState(false);
   const inlineTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -279,13 +333,29 @@ export function LiveOverlay() {
       try {
         const payload = event.payload;
         if (payload?.segment_id && payload?.text) {
+          const trimmedText = payload.text.trim();
           setSegments((prev) =>
             prev.map((seg) =>
               seg.id === payload.segment_id
-                ? { ...seg, text: payload.text.trim(), isCorrected: true }
+                ? { ...seg, text: trimmedText, isCorrected: true }
                 : seg
             )
           );
+
+          // Extração inteligente de palavras-chave da IA (substantivos e termos modificados/enfatizados)
+          const words = trimmedText.split(/\s+/).map((w) => w.replace(/[.,/#!$%^&*;:{}=\-_`~()?"'<>]/g, '').toLowerCase());
+          const significantWords = new Set<string>();
+          for (const w of words) {
+            if (w.length >= 4 && !PORTUGUESE_STOPWORDS.has(w)) {
+              significantWords.add(w);
+            }
+          }
+          if (significantWords.size > 0) {
+            setLlmKeywordsMap((prev) => ({
+              ...prev,
+              [payload.segment_id]: significantWords,
+            }));
+          }
         }
       } catch (e) {
         // silencia
@@ -302,6 +372,16 @@ export function LiveOverlay() {
             if (clean && payload.mode !== 'info' && !clean.startsWith('Fonte conectada:')) {
               const segId = payload.segment_id || `seg_${Date.now()}`;
               setSegments((prev) => {
+                // Previne duplicação de frases idênticas consecutivas (ex: bug de corte do buffer)
+                const last = prev[prev.length - 1];
+                if (last && (last.text.trim().toLowerCase() === clean.toLowerCase() || clean.toLowerCase().startsWith(last.text.trim().toLowerCase()))) {
+                  // Se for uma versão mais completa da última frase, substitui ao invés de duplicar
+                  return [...prev.slice(0, -1), { id: segId, text: clean, isCorrected: false }];
+                }
+                if (last && last.text.trim().toLowerCase().includes(clean.toLowerCase())) {
+                  // Já continha esse texto, não duplica
+                  return prev;
+                }
                 const next = [...prev, { id: segId, text: clean, isCorrected: false }];
                 // Mantém até 30 frases no buffer contínuo de rolagem
                 return next.length > 30 ? next.slice(-30) : next;
@@ -310,9 +390,11 @@ export function LiveOverlay() {
             setLivePartialText('');
             setIsSpeaking(false);
           } else {
-            // Palavras em formação ao vivo (streaming palavra por palavra)
-            if (payload.text.trim() && payload.mode !== 'info' && !payload.text.trim().startsWith('Fonte conectada:')) {
-              setLivePartialText(payload.text.trim());
+            // Palavras em formação ao vivo com Fixação Progressiva de Prefixo:
+            // Trava as palavras já confirmadas e só acrescenta o que estiver sendo falado a mais
+            const cleanPartial = payload.text.trim();
+            if (cleanPartial && payload.mode !== 'info' && !cleanPartial.startsWith('Fonte conectada:')) {
+              setLivePartialText((prev) => mergeStreamingText(prev, cleanPartial));
             }
             setIsSpeaking(true);
           }
@@ -328,6 +410,13 @@ export function LiveOverlay() {
         setPopupSettings(event.payload);
       }
     }).then((f) => (unlistenPopupSettings = f)).catch(() => {});
+
+    let unlistenDisplaySettings = () => {};
+    listen<OverlayDisplaySettings>('whisper-overlay-display-settings-changed', (event) => {
+      if (event.payload) {
+        setDisplaySettings(event.payload);
+      }
+    }).then((f) => (unlistenDisplaySettings = f)).catch(() => {});
 
     let unlistenLlmAction = () => {};
     listen<LlmActionTriggered>('llm_action_triggered', (event) => {
@@ -382,6 +471,7 @@ export function LiveOverlay() {
       unlistenFontSize();
       unlistenSettingsSaved();
       unlistenPopupSettings();
+      unlistenDisplaySettings();
       unlistenLlmAction();
       if (inlineTimerRef.current) clearTimeout(inlineTimerRef.current);
       window.removeEventListener('resize', handleWindowResize);
@@ -721,22 +811,73 @@ export function LiveOverlay() {
         ) : (
           (segments.length > 0 || livePartialText || (popupSettings.displayMode === 'inline' && inlineAction)) ? (
             <div className="overlay-segments-container">
-              {segments.map((seg, idx) => (
-                <span key={seg.id} className={`overlay-segment ${seg.isCorrected ? 'corrected' : ''}`}>
-                  {seg.text}
-                  {seg.isCorrected && (
-                    <span className="corrected-badge" title="Refinado e pontuado por IA">
-                      <Sparkles size={11} />
-                    </span>
-                  )}
-                  {idx < segments.length - 1 || livePartialText ? ' ' : ''}
-                </span>
-              ))}
+              {/* Frases finalizadas com controle de visibilidade (últimas N linhas para evitar confusão) */}
+              {(displaySettings.maxLinesVisible > 0 
+                ? segments.slice(-displaySettings.maxLinesVisible) 
+                : segments
+              ).map((seg, segIdx, visibleSegs) => {
+                const isCurrent = segIdx === visibleSegs.length - 1 && !livePartialText;
+                const words = seg.text.split(/\s+/).filter(Boolean);
+                const segKeywords = llmKeywordsMap[seg.id];
+
+                return (
+                  <div 
+                    key={seg.id} 
+                    className={`overlay-segment-row ${isCurrent ? 'current' : 'faded'}`}
+                  >
+                    {words.map((w, wIdx) => {
+                      const isKw = isWordKeyword(w, displaySettings, segKeywords);
+                      const highlightClass = isKw ? `highlight-${displaySettings.highlightStyle}` : '';
+                      const animClass = displaySettings.wordByWordAnimation ? 'word-enter' : '';
+                      const hlColor = displaySettings.highlightColor || '#38bdf8';
+                      const customStyle: React.CSSProperties | undefined = isKw ? {
+                        color: displaySettings.highlightStyle === 'underline' ? undefined : hlColor,
+                        textShadow: displaySettings.highlightStyle === 'underline' ? undefined : `0 0 10px ${hlColor}77`,
+                        borderBottomColor: displaySettings.highlightStyle === 'underline' ? hlColor : undefined,
+                        ['--custom-highlight-color' as any]: hlColor,
+                      } : undefined;
+
+                      return (
+                        <span
+                          key={`${seg.id}_${wIdx}`}
+                          className={`overlay-word ${animClass} ${highlightClass}`}
+                          style={customStyle}
+                        >
+                          {w}
+                        </span>
+                      );
+                    })}
+                  </div>
+                );
+              })}
+
+              {/* Fala ao vivo em formação (streaming de palavras da frase atual) */}
               {livePartialText && (
-                <span className="overlay-live-partial">
-                  {livePartialText}
+                <div className="overlay-live-partial-container">
+                  {livePartialText.split(/\s+/).filter(Boolean).map((w, wIdx, arr) => {
+                    const isLastWord = wIdx === arr.length - 1;
+                    const isKw = isWordKeyword(w, displaySettings);
+                    const highlightClass = isKw ? `highlight-${displaySettings.highlightStyle}` : '';
+                    const hlColor = displaySettings.highlightColor || '#38bdf8';
+                    const customStyle: React.CSSProperties | undefined = isKw ? {
+                      color: displaySettings.highlightStyle === 'underline' ? undefined : hlColor,
+                      textShadow: displaySettings.highlightStyle === 'underline' ? undefined : `0 0 10px ${hlColor}77`,
+                      borderBottomColor: displaySettings.highlightStyle === 'underline' ? hlColor : undefined,
+                      ['--custom-highlight-color' as any]: hlColor,
+                    } : undefined;
+
+                    return (
+                      <span
+                        key={`live_${wIdx}_${w}`}
+                        className={`overlay-word word-enter ${isLastWord ? 'active-speaking' : ''} ${highlightClass}`}
+                        style={customStyle}
+                      >
+                        {w}
+                      </span>
+                    );
+                  })}
                   <span className="cursor-blink">▍</span>
-                </span>
+                </div>
               )}
 
               {/* Card de Ação Embutido no Fluxo de Texto */}
