@@ -1,0 +1,125 @@
+# ==========================================
+# WhisperAgent - .gitignore
+# ==========================================
+
+# --- Environment & Secrets ---
+.env
+.env.local
+.env.*.local
+.env.development.local
+.env.test.local
+.env.production.local
+!.env.example
+!.env.template
+
+# --- Node / Frontend (React / Vite) ---
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+dist-ssr/
+**/dist-ssr/
+*.local
+.npm/
+.eslintcache
+
+# --- Rust & Cargo ---
+target/
+**/target/
+**/*.rs.bk
+
+# --- Tauri ---
+**/gen/schemas/
+**/src-tauri/target/
+
+# --- Whisper / AI Models & Embedding Caches ---
+# Arquivos binários pesados de modelos (Whisper, FastEmbed, ONNX, etc.)
+.fastembed_cache/
+**/.fastembed_cache/
+models/
+**/models/
+WhisperAgent/models/
+*.bin
+*.onnx
+*.onnx_data
+*.safetensors
+*.gguf
+*.pt
+
+# --- SQLite & Local Databases ---
+# Banco de dados local de memória e sessões do WhisperAgent
+*.sqlite
+*.sqlite3
+*.db
+*.db3
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-wal
+*.sqlite3-shm
+*.db-wal
+*.db-shm
+memory.sqlite3
+**/memory.sqlite3
+
+# --- Logs, Traces & Debugging ---
+logs/
+**/logs/
+*.log
+**/*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+trace.txt
+**/trace.txt
+whisper_agent.log
+**/whisper_agent.log
+
+# --- IDEs & Code Editors ---
+.idea/
+**/.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/launch.json
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+*.sublime-workspace
+*.sublime-project
+
+# --- Operating System Files ---
+# Windows
+Thumbs.db
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+desktop.ini
+$RECYCLE.BIN/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+
+# --- Obsidian & Knowledge Graphs ---
+.obsidian/workspace
+.obsidian/workspace.json
+.obsidian/workspace-mobile.json
+.obsidian/cache
+graphify-out/
+
+# --- Temporary & Scratch Files ---
+*.tmp
+*.temp
+scratch/

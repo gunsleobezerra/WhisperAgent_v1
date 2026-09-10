@@ -1,0 +1,49 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "WhisperAgent",
+  "version": "0.1.0",
+  "identifier": "com.leonardo.app",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "WhisperAgent Overlay",
+        "label": "overlay",
+        "url": "index.html",
+        "width": 500,
+        "height": 180,
+        "minWidth": 320,
+        "minHeight": 110,
+        "resizable": true,
+        "fullscreen": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "decorations": false,
+        "shadow": false,
+        "visible": true,
+        "skipTaskbar": true,
+        "x": 40,
+        "y": 40
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}
