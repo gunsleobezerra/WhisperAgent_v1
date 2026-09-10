@@ -5,6 +5,7 @@ import { useAppRouter } from './hooks/useAppRouter';
 import { SettingsWindow } from './components/SettingsWindow';
 import { LiveOverlay } from './components/LiveOverlay';
 import { PopupWindow } from './components/PopupWindow';
+import { SessionSummaryWindow } from './components/SessionSummaryWindow';
 import { ThemeConfig, applyThemeToDom, getStoredTheme } from './utils/theme';
 import './App.css';
 
@@ -46,6 +47,10 @@ function App() {
 
   if (currentWindow === 'popup') {
     return <PopupWindow />;
+  }
+
+  if (currentWindow === 'session-summary') {
+    return <SessionSummaryWindow />;
   }
 
   return <LiveOverlay />;

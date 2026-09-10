@@ -6,6 +6,7 @@ export type PopupDisplayMode = 'inline' | 'screen_corner' | 'overlay';
 export type ScreenCorner = 'top-right' | 'top-left' | 'bottom-right' | 'bottom-left';
 
 export interface PopupSettingsConfig {
+  popupEnabled: boolean;
   displayMode: PopupDisplayMode;
   screenCorner: ScreenCorner;
   soundEnabled: boolean;
@@ -16,6 +17,7 @@ export interface PopupSettingsConfig {
 }
 
 export const DEFAULT_POPUP_SETTINGS: PopupSettingsConfig = {
+  popupEnabled: true,
   displayMode: 'screen_corner',
   screenCorner: 'top-right',
   soundEnabled: true,
@@ -33,6 +35,9 @@ export function getStoredPopupSettings(): PopupSettingsConfig {
     if (raw) {
       const parsed = JSON.parse(raw);
       return {
+        popupEnabled: typeof parsed.popupEnabled === 'boolean'
+          ? parsed.popupEnabled
+          : DEFAULT_POPUP_SETTINGS.popupEnabled,
         displayMode: ['inline', 'screen_corner', 'overlay'].includes(parsed.displayMode)
           ? parsed.displayMode
           : DEFAULT_POPUP_SETTINGS.displayMode,
@@ -66,6 +71,7 @@ export async function saveAndBroadcastPopupSettings(settings: PopupSettingsConfi
     try {
       await emit('whisper-popup-settings-changed', settings);
       await invoke('set_min_chars_to_trigger', { minChars: settings.minCharsToTrigger });
+      await invoke('set_popups_enabled', { enabled: settings.popupEnabled });
     } catch {
       // Ignora erro em ambientes sem Tauri IPC (ex: navegador web)
     }

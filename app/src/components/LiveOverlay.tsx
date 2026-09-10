@@ -18,6 +18,7 @@ import {
   Copy,
   Check,
   RotateCcw,
+  FileText,
 } from 'lucide-react';
 import { PopupSystem } from './PopupSystem';
 import { getStoredPersonas, getStoredActivePersonaId, cleanPersonaName, DEFAULT_PERSONAS } from '../types/persona';
@@ -430,6 +431,9 @@ export function LiveOverlay() {
       lastHandledActionId.current = payload.action_id;
 
       const currentSettings = getStoredPopupSettings();
+      if (currentSettings.popupEnabled === false) {
+        return;
+      }
       if (currentSettings.displayMode === 'inline') {
         setInlineAction(payload);
         setInlineCopied(false);
@@ -456,6 +460,18 @@ export function LiveOverlay() {
       }
     }).then((f) => (unlistenLlmAction = f)).catch(() => {});
 
+    let unlistenTrayPopups = () => {};
+    listen<{ enabled: boolean }>('tray-popups-toggled', (event) => {
+      if (typeof event.payload?.enabled === 'boolean') {
+        const cur = getStoredPopupSettings();
+        const updated = { ...cur, popupEnabled: event.payload.enabled };
+        setPopupSettings(updated);
+        try {
+          localStorage.setItem('whisper_agent_popup_settings', JSON.stringify(updated));
+        } catch {}
+      }
+    }).then((f) => (unlistenTrayPopups = f)).catch(() => {});
+
     if (!audioStartedRef.current) {
       audioStartedRef.current = true;
       startAudio();
@@ -473,6 +489,7 @@ export function LiveOverlay() {
       unlistenPopupSettings();
       unlistenDisplaySettings();
       unlistenLlmAction();
+      unlistenTrayPopups();
       if (inlineTimerRef.current) clearTimeout(inlineTimerRef.current);
       window.removeEventListener('resize', handleWindowResize);
       clearTimeout(resizeTimer);
@@ -620,6 +637,14 @@ export function LiveOverlay() {
     }
   };
 
+  const handleOpenSessionSummary = async () => {
+    try {
+      await invoke('request_open_session_summary');
+    } catch (err) {
+      console.error('Erro ao invocar request_open_session_summary:', err);
+    }
+  };
+
   const handleClose = async () => {
     try {
       await invoke('hide_overlay');
@@ -754,6 +779,14 @@ export function LiveOverlay() {
             title={isListening ? "Interromper transcrição" : "Retomar transcrição"}
           >
             {isListening ? <Pause size={13} /> : <Play size={13} />}
+          </button>
+          <button 
+            type="button"
+            className="overlay-icon-btn"
+            onClick={handleOpenSessionSummary}
+            title="Ver Sumário da Sessão & ID (Memória consolidada)"
+          >
+            <FileText size={13} />
           </button>
           <button 
             type="button"

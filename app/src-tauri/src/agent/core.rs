@@ -78,6 +78,20 @@ pub static LLM_CORRECTION_ENABLED: Lazy<Arc<RwLock<bool>>> =
 pub static MIN_CHARS_TO_TRIGGER: Lazy<Arc<RwLock<usize>>> =
     Lazy::new(|| Arc::new(RwLock::new(20)));
 
+pub static POPUPS_ENABLED: Lazy<Arc<RwLock<bool>>> =
+    Lazy::new(|| Arc::new(RwLock::new(true)));
+
+pub fn set_popups_enabled(enabled: bool) {
+    if let Ok(mut lock) = POPUPS_ENABLED.write() {
+        *lock = enabled;
+        log::info!("[Agent Core] Popups/Notificações da persona: {}", if enabled { "ATIVADOS" } else { "DESATIVADOS" });
+    }
+}
+
+pub fn is_popups_enabled() -> bool {
+    POPUPS_ENABLED.read().map(|v| *v).unwrap_or(true)
+}
+
 /// Caminho para o arquivo SQLite de memória. Populado no boot pelo lib.rs.
 pub static MEMORY_DB_PATH: Lazy<Arc<RwLock<String>>> =
     Lazy::new(|| Arc::new(RwLock::new(String::new())));
@@ -335,6 +349,11 @@ pub fn evaluate_transcription(app_handle: &AppHandle, raw_text: &str, segment_id
                     || trimmed.eq_ignore_ascii_case("silêncio")
                 {
                     log::info!("[Agent Core] Resposta da persona foi silenciosa (sem popup).");
+                    return;
+                }
+
+                if !is_popups_enabled() {
+                    log::info!("[Agent Core] Popups desativados pelo usuário (Tray/Configurações). Resposta da persona suprimida.");
                     return;
                 }
 

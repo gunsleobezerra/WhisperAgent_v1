@@ -12,11 +12,12 @@ use crate::agent::core::ByokSettings;
 use crate::agent::llm_client::execute_chat_completion;
 
 /// Intervalo máximo entre sumarizações (segundos). Garante que o buffer
-/// sempre seja resumido mesmo se não houver silêncio.
-const SUMMARIZE_INTERVAL_SECS: u64 = 120;
+/// Intervalo máximo entre sumarizações (segundos). Garante que o buffer
+/// sempre seja resumido mesmo em conversas pausadas.
+const SUMMARIZE_INTERVAL_SECS: u64 = 45;
 
-/// Mínimo de caracteres acumulados para disparar sumarização.
-const MIN_CHARS_TO_SUMMARIZE: usize = 200;
+/// Mínimo de caracteres acumulados para disparar sumarização precoce.
+const MIN_CHARS_TO_SUMMARIZE: usize = 60;
 
 /// Canal para enviar IDs de summaries recém-criados ao EmbeddingWorker.
 pub type SummaryEventSender = UnboundedSender<(String, String)>; // (summary_id, summary_text)
@@ -24,18 +25,17 @@ pub type SummaryEventSender = UnboundedSender<(String, String)>; // (summary_id,
 /// Worker assíncrono que recebe segmentos expirados do HotRingBuffer via `std::sync::mpsc`,
 /// acumula o texto e, quando o gatilho temporal/tamanho disparar, sumariza via LLM
 /// e persiste no SQLite.
-///
-/// Deve ser chamado via `std::thread::spawn` (não `tokio::spawn`) pois usa um `mpsc::Receiver`
-/// síncrono. Internamente cria um runtime Tokio para as chamadas async da LLM.
 use std::sync::RwLock;
+use tauri::Emitter;
 
 pub fn rolling_summarizer_worker(
     rx: Receiver<AudioSegment>,
     db_path: String,
     byok_arc: Arc<RwLock<ByokSettings>>,
     embedding_tx: SummaryEventSender,
+    app_handle: Option<tauri::AppHandle>,
 ) {
-    log::info!("[Summarizer] 🔄 Worker iniciado. Intervalo máximo: {}s", SUMMARIZE_INTERVAL_SECS);
+    log::info!("[Summarizer] 🔄 Worker iniciado. Intervalo máximo: {}s, Min chars: {}", SUMMARIZE_INTERVAL_SECS, MIN_CHARS_TO_SUMMARIZE);
 
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -52,7 +52,7 @@ pub fn rolling_summarizer_worker(
     let mut last_summarized_at = SystemTime::now();
 
     loop {
-        // Coleta todos os segmentos disponíveis sem bloquear além de 1s
+        // 1. Coleta segmentos que chegam via canal
         match rx.recv_timeout(Duration::from_secs(1)) {
             Ok(segment) => {
                 if !segment.text.trim().is_empty() {
@@ -67,17 +67,28 @@ pub fn rolling_summarizer_worker(
                     );
                 }
             }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {} // normal
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // Durante silêncio, drena segmentos que já têm mais de 35s de idade no buffer global
+                let drained = crate::memory::ring_buffer::drain_expired_global_ring_buffer(35_000);
+                for seg in drained {
+                    if !seg.text.trim().is_empty() {
+                        if !accumulated_text.is_empty() {
+                            accumulated_text.push(' ');
+                        }
+                        accumulated_text.push_str(seg.text.trim());
+                    }
+                }
+            }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 log::warn!("[Summarizer] Canal desconectado. Encerrando worker.");
                 break;
             }
         }
 
-        // Verifica se deve disparar sumarização
+        // 2. Avalia gatilho de sumarização
         let elapsed = last_summarized_at.elapsed().unwrap_or_default().as_secs();
-        let should_summarize = (accumulated_text.len() >= MIN_CHARS_TO_SUMMARIZE && elapsed >= 30)
-            || elapsed >= SUMMARIZE_INTERVAL_SECS;
+        let should_summarize = (accumulated_text.len() >= MIN_CHARS_TO_SUMMARIZE && elapsed >= 15)
+            || (elapsed >= SUMMARIZE_INTERVAL_SECS && !accumulated_text.trim().is_empty());
 
         if !should_summarize || accumulated_text.trim().is_empty() {
             continue;
@@ -102,58 +113,92 @@ pub fn rolling_summarizer_worker(
             }
         };
 
-        // Usa modelo leve para sumarização (não impacta cota do modelo principal)
+        // Usa modelo leve para sumarização ou fallback resiliente se a LLM falhar
         let summary_result = rt.block_on(summarize_text(&byok, &text_to_summarize));
+        let summary = match summary_result {
+            Ok(s) => s,
+            Err(err) => {
+                log::warn!("[Summarizer] Falha na chamada LLM ({}), usando síntese estruturada de fallback", err);
+                format_fallback_summary(&text_to_summarize)
+            }
+        };
 
-        match summary_result {
-            Ok(summary) => {
-                let summary_id = Uuid::new_v4().to_string();
-                let created_at = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0);
+        let summary_id = Uuid::new_v4().to_string();
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
 
-                // Abre conexão de escrita para o SQLite
-                match Connection::open(&db_path) {
-                    Ok(mut conn) => {
-                        if save_summary(&mut conn, &summary_id, &session_id, created_at, &summary) {
-                            log::info!(
-                                "[Summarizer] ✅ Resumo salvo ({} chars): \"{}\"",
-                                summary.len(),
-                                &summary.chars().take(120).collect::<String>()
-                            );
-                            // Notifica o EmbeddingWorker
-                            let _ = embedding_tx.send((summary_id, summary));
-                        }
-                    }
-                    Err(e) => {
-                        log::error!("[Summarizer] Falha ao abrir DB para salvar summary: {}", e);
+        // Abre conexão de escrita para o SQLite
+        match Connection::open(&db_path) {
+            Ok(mut conn) => {
+                if save_summary(&mut conn, &summary_id, &session_id, created_at, &summary) {
+                    log::info!(
+                        "[Summarizer] ✅ Resumo salvo ({} chars): \"{}\"",
+                        summary.len(),
+                        &summary.chars().take(120).collect::<String>()
+                    );
+                    // Notifica o EmbeddingWorker
+                    let _ = embedding_tx.send((summary_id.clone(), summary.clone()));
+
+                    // Notifica o frontend (Janela de Sumário / UI)
+                    if let Some(ref handle) = app_handle {
+                        let _ = handle.emit("memory://summary-generated", serde_json::json!({
+                            "id": summary_id,
+                            "session_id": session_id,
+                            "created_at": created_at,
+                            "summary": summary
+                        }));
                     }
                 }
             }
             Err(e) => {
-                log::error!("[Summarizer] Falha ao sumarizar via LLM: {}", e);
+                log::error!("[Summarizer] Falha ao abrir DB para salvar summary: {}", e);
             }
         }
     }
 }
 
+/// Síntese estruturada direta para garantir que o usuário NUNCA fique com a tela vazia,
+/// mesmo sem chave de API ou sem internet configurada.
+fn format_fallback_summary(text: &str) -> String {
+    let clean = text.trim();
+    if clean.is_empty() {
+        return "- [Nenhum ponto relevante registrado]".to_string();
+    }
+
+    let sentences: Vec<&str> = clean
+        .split(|c| c == '.' || c == '?' || c == '!' || c == '\n')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty() && s.len() > 5)
+        .collect();
+
+    if sentences.is_empty() {
+        return format!("- {}", clean.chars().take(160).collect::<String>());
+    }
+
+    let mut bullets = Vec::new();
+    for sentence in sentences.iter().take(4) {
+        bullets.push(format!("- {}", sentence));
+    }
+    bullets.join("\n")
+}
+
 async fn summarize_text(byok: &ByokSettings, text: &str) -> Result<String, String> {
-    // Se não há API configurada, retorna o texto truncado como fallback
+    // Se não há API configurada, utiliza o formatador local instantâneo
     if byok.endpoint.trim().is_empty() {
-        let fallback = text.chars().take(300).collect::<String>();
-        return Ok(fallback);
+        return Ok(format_fallback_summary(text));
     }
 
     let system_prompt = "Você é um assistente de síntese de contexto. \
 Recebe blocos de transcrição de áudio e extrai os fatos, tópicos e informações \
 essenciais em bullet points concisos em Português do Brasil. \
 REGRAS: \
-(1) Máximo de 5 bullet points por bloco. \
+(1) Máximo de 4 bullet points por bloco. \
 (2) Preserve nomes próprios, números e termos técnicos exatamente. \
 (3) Não adicione comentários, introduções ou conclusões. \
 (4) Use formato: '- [fato ou tópico]'. \
-(5) Se o texto for muito curto ou irrelevante, retorne apenas: '[sem fatos relevantes]'.";
+(5) Se o texto for muito curto ou irrelevante, sintetize a essência do que foi dito.";
 
     let user_prompt = format!("Transcrição:\n{}", text);
 

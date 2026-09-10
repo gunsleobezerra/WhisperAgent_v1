@@ -621,11 +621,30 @@ export function SettingsWindow() {
   const [personas, setPersonas] = useState<PersonaConfig[]>(getStoredPersonas);
   const [activePersonaId, setActivePersonaId] = useState<string>(getStoredActivePersonaId);
   const [selectedPersonaId, setSelectedPersonaId] = useState<string>(getStoredActivePersonaId);
+  const [personaSearchQuery, setPersonaSearchQuery] = useState('');
+  const [selectedPersonaCategory, setSelectedPersonaCategory] = useState<string>('all');
   const [editingPersona, setEditingPersona] = useState<PersonaConfig>(() => {
     const list = getStoredPersonas();
     const actId = getStoredActivePersonaId();
     return list.find((p) => p.id === actId) || list[0] || DEFAULT_PERSONAS[0];
   });
+
+  const filteredPersonas = useMemo(() => {
+    const query = personaSearchQuery.trim().toLowerCase();
+    return personas.filter((p) => {
+      const matchCategory =
+        selectedPersonaCategory === 'all' ||
+        (p.category || 'productivity') === selectedPersonaCategory;
+      if (!matchCategory) return false;
+
+      if (!query) return true;
+      const matchName = (p.name || '').toLowerCase().includes(query);
+      const matchDesc = (p.description || '').toLowerCase().includes(query);
+      const matchHotword = (p.hotword || '').toLowerCase().includes(query);
+      const matchPrompt = (p.system_prompt || '').toLowerCase().includes(query);
+      return matchName || matchDesc || matchHotword || matchPrompt;
+    });
+  }, [personas, personaSearchQuery, selectedPersonaCategory]);
 
   // Configurações de Ações e Popups do Modelo
   const [popupSettings, setPopupSettings] = useState<PopupSettingsConfig>(getStoredPopupSettings);
@@ -762,10 +781,23 @@ export function SettingsWindow() {
       }
     }).then((f) => (unlistenFinalized = f)).catch(() => {});
 
+    let unlistenTrayPopups = () => {};
+    listen<{ enabled: boolean }>('tray-popups-toggled', (event) => {
+      if (typeof event.payload?.enabled === 'boolean') {
+        const cur = getStoredPopupSettings();
+        const updated = { ...cur, popupEnabled: event.payload.enabled };
+        setPopupSettings(updated);
+        try {
+          localStorage.setItem('whisper_agent_popup_settings', JSON.stringify(updated));
+        } catch {}
+      }
+    }).then((f) => (unlistenTrayPopups = f)).catch(() => {});
+
     return () => {
       unlistenAudio();
       unlistenLevel();
       unlistenFinalized();
+      unlistenTrayPopups();
     };
   }, []);
 
@@ -1913,49 +1945,161 @@ export function SettingsWindow() {
                 </button>
               </div>
 
-              {/* Grid de Seleção de Personas */}
-              <div className="personas-grid">
-                {personas.map((p) => {
-                  const isSelected = p.id === selectedPersonaId;
-                  const isActive = p.id === activePersonaId;
-                  return (
-                    <div
-                      key={p.id}
-                      className={`persona-card ${isSelected ? 'selected' : ''} ${
-                        isActive ? 'active' : ''
-                      }`}
-                      onClick={() => handleSelectPersona(p.id)}
+              {/* Barra de Pesquisa e Filtros de Categoria */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '12px' }}>
+                <div style={{ position: 'relative', width: '100%' }}>
+                  <Search
+                    size={14}
+                    style={{
+                      position: 'absolute',
+                      left: '10px',
+                      top: '50%',
+                      transform: 'translateY(-50%)',
+                      color: 'var(--text-secondary)',
+                      pointerEvents: 'none',
+                    }}
+                  />
+                  <input
+                    type="text"
+                    className="form-input"
+                    value={personaSearchQuery}
+                    onChange={(e) => setPersonaSearchQuery(e.target.value)}
+                    placeholder="Pesquisar por nome, hotword (palavra de ativação) ou especialidade..."
+                    style={{
+                      paddingLeft: '32px',
+                      paddingRight: personaSearchQuery ? '28px' : '10px',
+                      fontSize: '12px',
+                      height: '32px',
+                    }}
+                  />
+                  {personaSearchQuery && (
+                    <button
+                      type="button"
+                      onClick={() => setPersonaSearchQuery('')}
+                      style={{
+                        position: 'absolute',
+                        right: '8px',
+                        top: '50%',
+                        transform: 'translateY(-50%)',
+                        background: 'transparent',
+                        border: 'none',
+                        color: 'var(--text-secondary)',
+                        cursor: 'pointer',
+                        padding: '2px',
+                        display: 'flex',
+                        alignItems: 'center',
+                      }}
+                      title="Limpar busca"
                     >
-                      <div className="persona-card-header">
-                        <span
-                          className="persona-name"
-                          style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
-                        >
-                          {renderPersonaIcon(p.id)}
-                          {cleanPersonaName(p.name)}
-                        </span>
-                        {isActive && (
+                      <X size={13} />
+                    </button>
+                  )}
+                </div>
+
+                {/* Categorias Rápidas */}
+                <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap', alignItems: 'center' }}>
+                  {[
+                    { id: 'all', label: 'Todas (50+)' },
+                    { id: 'productivity', label: 'Produtividade' },
+                    { id: 'dev', label: 'Desenvolvimento' },
+                    { id: 'business', label: 'Reuniões & Negócios' },
+                    { id: 'gaming', label: 'Jogos & Esports' },
+                    { id: 'study', label: 'Estudos & Idiomas' },
+                    { id: 'creative', label: 'Criação & Copy' },
+                    { id: 'specialist', label: 'Especialistas' },
+                  ].map((cat) => {
+                    const isCatActive = selectedPersonaCategory === cat.id;
+                    return (
+                      <button
+                        key={cat.id}
+                        type="button"
+                        onClick={() => setSelectedPersonaCategory(cat.id)}
+                        style={{
+                          fontSize: '11px',
+                          padding: '3px 8px',
+                          borderRadius: '12px',
+                          border: isCatActive
+                            ? '1px solid var(--accent-color)'
+                            : '1px solid var(--border-color)',
+                          background: isCatActive
+                            ? 'rgba(255, 255, 255, 0.15)'
+                            : 'rgba(255, 255, 255, 0.03)',
+                          color: isCatActive ? 'var(--text-primary)' : 'var(--text-secondary)',
+                          cursor: 'pointer',
+                          transition: 'all 0.15s ease',
+                          fontWeight: isCatActive ? 600 : 400,
+                        }}
+                      >
+                        {cat.label}
+                      </button>
+                    );
+                  })}
+                  <span style={{ fontSize: '11px', color: 'var(--text-secondary)', marginLeft: 'auto' }}>
+                    {filteredPersonas.length} {filteredPersonas.length === 1 ? 'persona' : 'personas'}
+                  </span>
+                </div>
+              </div>
+
+              {/* Grid de Seleção de Personas com barra de rolagem suave */}
+              <div className="personas-grid" style={{ maxHeight: '340px', overflowY: 'auto', paddingRight: '4px' }}>
+                {filteredPersonas.length === 0 ? (
+                  <div
+                    style={{
+                      gridColumn: '1 / -1',
+                      padding: '24px',
+                      textAlign: 'center',
+                      color: 'var(--text-secondary)',
+                      fontSize: '12px',
+                      background: 'rgba(255, 255, 255, 0.02)',
+                      borderRadius: '8px',
+                      border: '1px dashed var(--border-color)',
+                    }}
+                  >
+                    Nenhuma persona encontrada para a busca "{personaSearchQuery}".
+                  </div>
+                ) : (
+                  filteredPersonas.map((p) => {
+                    const isSelected = p.id === selectedPersonaId;
+                    const isActive = p.id === activePersonaId;
+                    return (
+                      <div
+                        key={p.id}
+                        className={`persona-card ${isSelected ? 'selected' : ''} ${
+                          isActive ? 'active' : ''
+                        }`}
+                        onClick={() => handleSelectPersona(p.id)}
+                      >
+                        <div className="persona-card-header">
                           <span
-                            className="persona-badge-active"
-                            style={{ display: 'inline-flex', alignItems: 'center', gap: '3px' }}
+                            className="persona-name"
+                            style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
                           >
-                            <Check size={10} strokeWidth={3} /> ATIVA
+                            {renderPersonaIcon(p.id)}
+                            {cleanPersonaName(p.name)}
                           </span>
-                        )}
+                          {isActive && (
+                            <span
+                              className="persona-badge-active"
+                              style={{ display: 'inline-flex', alignItems: 'center', gap: '3px' }}
+                            >
+                              <Check size={10} strokeWidth={3} /> ATIVA
+                            </span>
+                          )}
+                        </div>
+                        <div className="persona-desc">{p.description}</div>
+                        <div className="persona-meta">
+                          <span className="persona-mode-tag">
+                            {p.trigger_mode === 'hotword'
+                              ? `Gatilho: "${p.hotword || 'palavra'}"`
+                              : p.trigger_mode === 'question_only'
+                              ? 'Apenas Dúvidas (?)'
+                              : 'Proativo (Sempre)'}
+                          </span>
+                        </div>
                       </div>
-                      <div className="persona-desc">{p.description}</div>
-                      <div className="persona-meta">
-                        <span className="persona-mode-tag">
-                          {p.trigger_mode === 'hotword'
-                            ? `Gatilho: "${p.hotword || 'palavra'}"`
-                            : p.trigger_mode === 'question_only'
-                            ? 'Apenas Dúvidas (?)'
-                            : 'Proativo (Sempre)'}
-                        </span>
-                      </div>
-                    </div>
-                  );
-                })}
+                    );
+                  })
+                )}
               </div>
             </div>
 
@@ -2995,8 +3139,31 @@ export function SettingsWindow() {
         {/* ABA: AÇÕES & POPUPS DO MODELO */}
         {activeTab === 'popups' && (
           <div>
+            {/* Ativação Global de Popups */}
+            <div className="form-group" style={{ marginBottom: '18px', background: 'var(--bg-secondary)', padding: '14px', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div>
+                  <label className="form-label" style={{ marginBottom: '2px', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '13px', fontWeight: 600 }}>
+                    <Bell size={15} color="var(--accent-color)" />
+                    Exibição de Popups & Notificações
+                  </label>
+                  <p style={{ fontSize: '11px', color: 'var(--text-secondary)', margin: 0 }}>
+                    Permite ou desativa a exibição visual de popups de respostas geradas pelas personas de IA (também controlável via menu da bandeja).
+                  </p>
+                </div>
+                <label className="toggle-switch">
+                  <input
+                    type="checkbox"
+                    checked={popupSettings.popupEnabled !== false}
+                    onChange={(e) => updatePopupSetting('popupEnabled', e.target.checked)}
+                  />
+                  <span className="toggle-slider"></span>
+                </label>
+              </div>
+            </div>
+
             {/* Modo de Exibição */}
-            <div className="form-group" style={{ marginBottom: '18px' }}>
+            <div className="form-group" style={{ marginBottom: '18px', opacity: popupSettings.popupEnabled === false ? 0.5 : 1, pointerEvents: popupSettings.popupEnabled === false ? 'none' : 'auto' }}>
               <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                 <LayoutTemplate size={14} color="var(--accent-color)" />
                 Local de Exibição das Ações do Modelo

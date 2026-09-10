@@ -222,3 +222,36 @@ pub fn build_agent_context(db_path: &str, session_id: &str, hot_buffer: HotRingB
         active_persona, events_summary_concatenated, hot_ring_buffer_concatenated
     )
 }
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct SummaryRecord {
+    pub id: String,
+    pub session_id: String,
+    pub created_at: i64,
+    pub summary: String,
+}
+
+/// Retorna todos os sumários consolidados da sessão ordenados por criação ascendente (cronológica).
+pub fn get_session_summaries(conn: &Connection, session_id: &str) -> Result<Vec<SummaryRecord>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT id, session_id, created_at, summary FROM events_summary WHERE session_id = ?1 ORDER BY created_at ASC"
+    )?;
+
+    let rows = stmt.query_map(params![session_id], |row| {
+        Ok(SummaryRecord {
+            id: row.get(0)?,
+            session_id: row.get(1)?,
+            created_at: row.get(2)?,
+            summary: row.get(3)?,
+        })
+    })?;
+
+    let mut list = Vec::new();
+    for item in rows {
+        if let Ok(rec) = item {
+            list.push(rec);
+        }
+    }
+    Ok(list)
+}
+

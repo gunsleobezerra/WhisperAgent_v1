@@ -1728,27 +1728,40 @@ html, body, #root {
   overflow: hidden;
 }
 
+.popup-stack-container {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+}
+
+.popup-stack-container.overlay-stack {
+  margin-top: 10px;
+}
+
 .popup-window-empty {
   width: 100vw;
   height: 100vh;
   background: transparent;
+  pointer-events: none;
 }
 
 .standalone-popup {
   margin-top: 0 !important;
   width: 100%;
   height: auto;
-  max-height: 100%;
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
+  pointer-events: auto !important;
+  transition: transform 0.22s ease-out, opacity 0.22s ease-out;
 }
 
 .standalone-scroll {
   flex: 1;
   overflow-y: auto;
   min-height: 0;
-  max-height: 440px;
+  max-height: 380px;
 }
 
 /* ==========================================================================

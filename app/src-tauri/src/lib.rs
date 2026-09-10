@@ -60,6 +60,103 @@ async fn request_open_settings(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn request_open_session_summary(app: tauri::AppHandle) -> Result<(), String> {
+    log::info!("[Window Manager] >> Solicitada abertura da Janela de Sumário da Sessão");
+    if let Some(window) = app.get_webview_window("session-summary") {
+        log::info!("[Window Manager] Janela 'session-summary' existente encontrada, exibindo...");
+        let _ = window.set_shadow(false);
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    } else {
+        log::info!("[Window Manager] Criando nova janela 'session-summary'...");
+        let builder = tauri::WebviewWindowBuilder::new(
+            &app,
+            "session-summary",
+            tauri::WebviewUrl::App("index.html?window=session-summary".into()),
+        )
+        .title("WhisperAgent - Sumário da Sessão")
+        .inner_size(680.0, 560.0)
+        .min_inner_size(480.0, 380.0)
+        .resizable(true)
+        .transparent(true)
+        .always_on_top(true)
+        .decorations(false)
+        .shadow(false)
+        .center();
+
+        match builder.build() {
+            Ok(w) => {
+                log::info!("[Window Manager] ✓ Janela de sumário criada com sucesso.");
+                let _ = w.set_focus();
+            }
+            Err(e) => {
+                log::error!("[Window Manager] ❌ Falha ao criar janela de sumário: {}", e);
+                return Err(format!("Erro ao criar janela de sumário: {}", e));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn hide_session_summary(app: tauri::AppHandle) -> Result<(), String> {
+    log::info!("[Window Manager] >> Fechando Janela de Sumário");
+    if let Some(window) = app.get_webview_window("session-summary") {
+        let _ = window.close();
+    }
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct CurrentSessionDetailsResponse {
+    session_id: String,
+    created_at: i64,
+    active_persona: String,
+    summaries: Vec<crate::memory::db::SummaryRecord>,
+}
+
+#[tauri::command]
+fn get_current_session_details() -> Result<CurrentSessionDetailsResponse, String> {
+    let session_id = crate::memory::session::get_current_session_id();
+    let db_path = crate::agent::core::MEMORY_DB_PATH.read().map(|p| p.clone()).unwrap_or_default();
+    
+    if db_path.is_empty() || session_id.is_empty() {
+        return Ok(CurrentSessionDetailsResponse {
+            session_id,
+            created_at: 0,
+            active_persona: crate::agent::core::get_active_persona().name,
+            summaries: vec![],
+        });
+    }
+
+    let conn = rusqlite::Connection::open(&db_path)
+        .map_err(|e| format!("Erro ao abrir conexão com banco de dados: {}", e))?;
+
+    let mut created_at = 0i64;
+    let mut active_persona = crate::agent::core::get_active_persona().name;
+
+    if let Ok(mut stmt) = conn.prepare("SELECT created_at, active_persona FROM sessions WHERE id = ?1") {
+        if let Ok(row) = stmt.query_row(rusqlite::params![session_id], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        }) {
+            created_at = row.0;
+            active_persona = row.1;
+        }
+    }
+
+    let summaries = crate::memory::db::get_session_summaries(&conn, &session_id)
+        .unwrap_or_default();
+
+    Ok(CurrentSessionDetailsResponse {
+        session_id,
+        created_at,
+        active_persona,
+        summaries,
+    })
+}
+
+#[tauri::command]
 async fn hide_settings(app: tauri::AppHandle) -> Result<(), String> {
     log::info!("[Window Manager] >> Fechando Janela de Configurações");
     if let Some(window) = app.get_webview_window("main") {
@@ -126,6 +223,98 @@ fn create_new_session() -> Result<String, String> {
     Ok(new_id)
 }
 
+#[tauri::command]
+async fn force_summarize_now(app: tauri::AppHandle) -> Result<crate::memory::db::SummaryRecord, String> {
+    log::info!("[Summarizer] ⚡ Forçando consolidação de resumo imediata solicitada pelo usuário...");
+    let session_id = crate::memory::session::get_current_session_id();
+    let db_path = crate::agent::core::MEMORY_DB_PATH.read().map(|p| p.clone()).unwrap_or_default();
+    
+    if db_path.is_empty() || session_id.is_empty() {
+        return Err("Sessão ou banco de dados não inicializados".into());
+    }
+
+    // Drena tudo que estiver acumulado no ring buffer recente
+    let drained = crate::memory::ring_buffer::drain_all_global_ring_buffer();
+    if drained.is_empty() {
+        return Err("Não há áudio recente no buffer para resumir".into());
+    }
+
+    let texts: Vec<String> = drained.into_iter().map(|s| s.text).collect();
+    let text_to_summarize = texts.join(" ");
+    if text_to_summarize.trim().is_empty() {
+        return Err("Buffer recente não contém texto significativo".into());
+    }
+
+    let byok = crate::agent::core::BYOK_SETTINGS.read().map(|b| b.clone()).unwrap_or_default();
+
+    // Se tiver endpoint configurado tenta LLM, senão usa síntese de sentenças
+    let summary_result = if !byok.endpoint.trim().is_empty() {
+        let system_prompt = "Você é um assistente de síntese de contexto. \
+Recebe blocos de transcrição de áudio e extrai os fatos, tópicos e informações \
+essenciais em bullet points concisos em Português do Brasil. \
+REGRAS: \
+(1) Máximo de 4 bullet points por bloco. \
+(2) Preserve nomes próprios, números e termos técnicos exatamente. \
+(3) Não adicione comentários, introduções ou conclusões. \
+(4) Use formato: '- [fato ou tópico]'. \
+(5) Sintetize a essência do que foi falado.";
+
+        let user_prompt = format!("Transcrição:\n{}", text_to_summarize);
+        crate::agent::llm_client::execute_chat_completion(&byok, system_prompt, &user_prompt, 0.3, 300).await
+    } else {
+        Err("Sem endpoint BYOK configurado".into())
+    };
+
+    let summary = match summary_result {
+        Ok(s) => s,
+        Err(_) => {
+            let clean = text_to_summarize.trim();
+            let sentences: Vec<&str> = clean
+                .split(|c| c == '.' || c == '?' || c == '!' || c == '\n')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty() && s.len() > 5)
+                .collect();
+            if sentences.is_empty() {
+                format!("- {}", clean.chars().take(160).collect::<String>())
+            } else {
+                let mut b = Vec::new();
+                for s in sentences.iter().take(4) {
+                    b.push(format!("- {}", s));
+                }
+                b.join("\n")
+            }
+        }
+    };
+
+    let summary_id = uuid::Uuid::new_v4().to_string();
+    let created_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    let mut conn = rusqlite::Connection::open(&db_path)
+        .map_err(|e| format!("Erro ao abrir conexão com SQLite: {}", e))?;
+
+    if !crate::memory::db::save_summary(&mut conn, &summary_id, &session_id, created_at, &summary) {
+        return Err("Falha ao salvar sumário no banco de dados".into());
+    }
+
+    use tauri::Emitter;
+    let _ = app.emit("memory://summary-generated", serde_json::json!({
+        "id": summary_id,
+        "session_id": session_id,
+        "created_at": created_at,
+        "summary": summary
+    }));
+
+    Ok(crate::memory::db::SummaryRecord {
+        id: summary_id,
+        session_id,
+        created_at,
+        summary,
+    })
+}
+
 
 #[tauri::command]
 fn submit_popup_interaction(action_id: String, interaction_result: String) -> Result<serde_json::Value, String> {
@@ -157,10 +346,9 @@ async fn show_corner_popup(
     height: Option<f64>,
 ) -> Result<(), String> {
     log::info!("[Window Manager] >> Exibindo popup no canto: {}", corner);
-    let w = width.unwrap_or(380.0);
-    let h = height.unwrap_or(190.0);
-    let margin = 24.0;
-    let margin_bottom = 54.0; // Espaço para barra de tarefas do Windows
+    let w = width.unwrap_or(400.0);
+    let margin = 20.0;
+    let margin_bottom = 40.0; // Espaço para barra de tarefas do Windows
 
     if let Some(ref act) = action {
         if let Ok(mut guard) = LAST_POPUP_ACTION.lock() {
@@ -177,7 +365,7 @@ async fn show_corner_popup(
                 .and_then(|w| w.current_monitor().ok().flatten())
         });
 
-    let (target_x, target_y) = if let Some(m) = monitor {
+    let (target_x, target_y, win_w, win_h) = if let Some(m) = monitor {
         let scale_factor = m.scale_factor();
         let mon_size = m.size();
         let mon_pos = m.position();
@@ -187,22 +375,26 @@ async fn show_corner_popup(
         let sx = mon_pos.x as f64 / scale_factor;
         let sy = mon_pos.y as f64 / scale_factor;
 
+        // Limite máximo de altura disponível na tela
+        let max_screen_h = (sh - margin - margin_bottom).max(200.0);
+        let actual_h = height.unwrap_or(max_screen_h).min(max_screen_h);
+
         let (tx, ty) = match corner.as_str() {
             "top-left" => (sx + margin, sy + margin),
-            "bottom-left" => (sx + margin, sy + sh - h - margin_bottom),
-            "bottom-right" => (sx + sw - w - margin, sy + sh - h - margin_bottom),
+            "bottom-left" => (sx + margin, sy + sh - actual_h - margin_bottom),
+            "bottom-right" => (sx + sw - w - margin, sy + sh - actual_h - margin_bottom),
             _ => (sx + sw - w - margin, sy + margin), // "top-right" padrão
         };
-        (tx, ty)
+        (tx, ty, w, actual_h)
     } else {
         log::warn!("[Window Manager] Monitor não detectado, usando posição padrão (topo direito)");
-        (1000.0, 40.0)
+        (1000.0, 40.0, w, height.unwrap_or(800.0))
     };
 
-    log::info!("[Window Manager] Coordenadas calculadas para popup: ({}, {}) [tamanho: {}x{}]", target_x, target_y, w, h);
+    log::info!("[Window Manager] Coordenadas calculadas para popup: ({}, {}) [tamanho: {}x{}]", target_x, target_y, win_w, win_h);
 
     if let Some(popup_win) = app.get_webview_window("popup") {
-        let _ = popup_win.set_size(tauri::LogicalSize::new(w, h));
+        let _ = popup_win.set_size(tauri::LogicalSize::new(win_w, win_h));
         let _ = popup_win.set_position(tauri::LogicalPosition::new(target_x.round(), target_y.round()));
         let _ = popup_win.set_shadow(false);
         let _ = popup_win.show();
@@ -223,7 +415,7 @@ async fn show_corner_popup(
             tauri::WebviewUrl::App("index.html?window=popup".into()),
         )
         .title("WhisperAgent - Notificação")
-        .inner_size(w, h)
+        .inner_size(win_w, win_h)
         .position(target_x.round(), target_y.round())
         .transparent(true)
         .always_on_top(true)
@@ -266,6 +458,17 @@ async fn hide_corner_popup(app: tauri::AppHandle) -> Result<(), String> {
         let _ = window.close();
     }
     Ok(())
+}
+
+#[tauri::command]
+fn set_popups_enabled(enabled: bool) -> Result<(), String> {
+    crate::agent::core::set_popups_enabled(enabled);
+    Ok(())
+}
+
+#[tauri::command]
+fn get_popups_enabled() -> Result<bool, String> {
+    Ok(crate::agent::core::is_popups_enabled())
 }
 
 #[tauri::command]
@@ -349,9 +552,15 @@ pub fn run() {
             // Cria os itens do menu da System Tray
             let settings_item = MenuItem::with_id(app, "settings", "Configurações", true, None::<&str>)?;
             let toggle_overlay_item = MenuItem::with_id(app, "toggle_overlay", "Alternar Overlay", true, None::<&str>)?;
+            let popups_initial_text = if crate::agent::core::is_popups_enabled() {
+                "Desativar Popups"
+            } else {
+                "Ativar Popups"
+            };
+            let toggle_popups_item = MenuItem::with_id(app, "toggle_popups", popups_initial_text, true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "Sair", true, None::<&str>)?;
 
-            let menu = Menu::with_items(app, &[&settings_item, &toggle_overlay_item, &quit_item])?;
+            let menu = Menu::with_items(app, &[&settings_item, &toggle_overlay_item, &toggle_popups_item, &quit_item])?;
 
             // Constrói o ícone na bandeja do Windows
             let _tray = TrayIconBuilder::new()
@@ -359,7 +568,7 @@ pub fn run() {
                 .tooltip("WhisperAgent")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
-                .on_menu_event(|app, event| {
+                .on_menu_event(move |app, event| {
                     match event.id.as_ref() {
                         "settings" => {
                             log::info!("[Tray Event] Abrindo Janela de Configurações");
@@ -378,6 +587,17 @@ pub fn run() {
                                     let _ = overlay.set_focus();
                                 }
                             }
+                        }
+                        "toggle_popups" => {
+                            let new_state = !crate::agent::core::is_popups_enabled();
+                            crate::agent::core::set_popups_enabled(new_state);
+                            log::info!("[Tray Event] Alternando Popups para: {}", if new_state { "ATIVADO" } else { "DESATIVADO" });
+
+                            let new_label = if new_state { "Desativar Popups" } else { "Ativar Popups" };
+                            let _ = toggle_popups_item.set_text(new_label);
+
+                            // Notifica o frontend para atualizar as telas de Configurações e Overlay
+                            let _ = app.emit("tray-popups-toggled", serde_json::json!({ "enabled": new_state }));
                         }
                         "quit" => {
                             log::info!("[Tray Event] Encerrando WhisperAgent...");
@@ -459,10 +679,11 @@ pub fn run() {
             // Worker 1: Rolling Summarizer
             let summarizer_db = db_path_str.clone();
             let byok_arc = crate::agent::core::BYOK_SETTINGS.clone();
+            let app_handle_for_summarizer = app.handle().clone();
             std::thread::Builder::new()
                 .name("whisper-rolling-summarizer".into())
                 .spawn(move || {
-                    rolling_summarizer_worker(expired_rx, summarizer_db, byok_arc, summary_tx);
+                    rolling_summarizer_worker(expired_rx, summarizer_db, byok_arc, summary_tx, Some(app_handle_for_summarizer));
                 })
                 .expect("Falha ao spawnar thread do rolling summarizer");
 
@@ -475,13 +696,14 @@ pub fn run() {
                 })
                 .expect("Falha ao spawnar thread do embedding worker");
 
-            log::info!("[WhisperAgent Core] ✅ Motor de Sessões, Summarizer e RAG Local inicializados.");
-
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             request_open_settings,
             hide_settings,
+            request_open_session_summary,
+            hide_session_summary,
+            get_current_session_details,
             minimize_overlay,
             hide_overlay,
             update_settings_state,
@@ -505,11 +727,14 @@ pub fn run() {
             get_active_persona,
             set_active_persona,
             create_new_session,
+            force_summarize_now,
             submit_popup_interaction,
             show_corner_popup,
             hide_corner_popup,
             get_current_popup_action,
             set_min_chars_to_trigger,
+            set_popups_enabled,
+            get_popups_enabled,
             open_browser_url
         ])
         .run(tauri::generate_context!())

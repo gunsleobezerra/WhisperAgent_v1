@@ -15,6 +15,12 @@ interface LlmActionTriggered {
   requires_interaction: boolean;
 }
 
+interface PopupItem {
+  action: LlmActionTriggered;
+  addedAt: number;
+  copied: boolean;
+}
+
 function renderPersonaIcon(id: string) {
   switch (id) {
     case 'concise_assistant':
@@ -31,22 +37,31 @@ function renderPersonaIcon(id: string) {
 }
 
 export function PopupWindow() {
-  const [popup, setPopup] = useState<LlmActionTriggered | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [popups, setPopups] = useState<PopupItem[]>([]);
   const [, setSettings] = useState<PopupSettingsConfig>(getStoredPopupSettings);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastActionIdRef = useRef<string | null>(null);
-  const cardRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const handledIdsRef = useRef<Set<string>>(new Set());
 
-  // Redimensiona a janela dinamicamente para se adequar ao tamanho exato do texto
+  // Redimensiona a janela dinamicamente para acomodar a pilha de popups
   useLayoutEffect(() => {
-    if (!popup) return;
+    if (popups.length === 0) {
+      return;
+    }
 
-    const measureAndResize = () => {
-      if (!cardRef.current) return;
-      const neededHeight = cardRef.current.scrollHeight + 20;
-      const clampedHeight = Math.min(520, Math.max(95, Math.ceil(neededHeight)));
-      const width = 380;
+    const checkHeightAndResize = () => {
+      if (!containerRef.current) return;
+      const screenMaxHeight = window.screen?.availHeight ? window.screen.availHeight - 60 : 850;
+      const totalHeight = containerRef.current.scrollHeight + 30;
+
+      // Se a pilha de popups estiver batendo no teto (exceder a altura da tela),
+      // descartamos os popups mais antigos (no topo da pilha) até caber
+      if (totalHeight > screenMaxHeight && popups.length > 1) {
+        setPopups((prev) => (prev.length > 1 ? prev.slice(1) : prev));
+        return;
+      }
+
+      const clampedHeight = Math.min(screenMaxHeight, Math.max(120, Math.ceil(totalHeight)));
+      const width = 400;
 
       const currentSettings = getStoredPopupSettings();
       invoke('show_corner_popup', {
@@ -56,233 +71,264 @@ export function PopupWindow() {
       }).catch(() => {});
     };
 
-    measureAndResize();
-
-    const ro = new ResizeObserver(() => {
-      measureAndResize();
-    });
-
-    if (cardRef.current) {
-      ro.observe(cardRef.current);
-    }
-
-    const t = setTimeout(measureAndResize, 50);
+    // Executa medição
+    checkHeightAndResize();
+    const t = setTimeout(checkHeightAndResize, 50);
 
     return () => {
-      ro.disconnect();
       clearTimeout(t);
     };
-  }, [popup?.content, popup?.action_id]);
+  }, [popups]);
 
-  const handleAction = (payload: LlmActionTriggered | null) => {
-    if (!payload) return;
-    if (payload.action_type && payload.action_type !== 'popup') return;
+  // Adiciona novo popup à fila
+  const pushPopup = (action: LlmActionTriggered) => {
+    if (!action || (action.action_type && action.action_type !== 'popup')) return;
+    const currentSettings = getStoredPopupSettings();
+    if (currentSettings.popupEnabled === false) return;
 
-    const isNew = lastActionIdRef.current !== payload.action_id;
-    lastActionIdRef.current = payload.action_id;
+    if (handledIdsRef.current.has(action.action_id)) {
+      return;
+    }
+    handledIdsRef.current.add(action.action_id);
 
-    setPopup(payload);
-    setCopied(false);
-
-    if (isNew) {
-      const currentSettings = getStoredPopupSettings();
-      if (currentSettings.soundEnabled) {
-        playPopupSound(currentSettings.soundTone, currentSettings.soundVolume);
-      }
+    if (currentSettings.soundEnabled) {
+      playPopupSound(currentSettings.soundTone, currentSettings.soundVolume);
     }
 
-    if (timerRef.current) clearTimeout(timerRef.current);
-    if (!payload.requires_interaction) {
-      const currentSettings = getStoredPopupSettings();
+    setPopups((prev) => {
+      const alreadyInList = prev.some((p) => p.action.action_id === action.action_id);
+      if (alreadyInList) return prev;
+
+      const updated = [...prev, { action, addedAt: Date.now(), copied: false }];
+      // Limite de segurança de 6 popups simultâneos para evitar sobrecarga
+      if (updated.length > 6) {
+        return updated.slice(updated.length - 6);
+      }
+      return updated;
+    });
+
+    // Auto dismiss individual com base nas configurações
+    if (!action.requires_interaction) {
       const timeoutMs = (currentSettings.autoDismissSeconds || 10) * 1000;
-      timerRef.current = setTimeout(() => {
-        dismissPopup();
+      setTimeout(() => {
+        dismissPopup(action.action_id);
       }, timeoutMs);
     }
   };
 
-  useEffect(() => {
-    // Busca a ação mais recente persistida no backend (garante exibição imediata caso o evento tenha sido disparado antes da montagem)
-    invoke<LlmActionTriggered | null>('get_current_popup_action')
-      .then((savedAction) => {
-        if (savedAction) {
-          handleAction(savedAction);
-        }
-      })
-      .catch(() => {});
+  const dismissPopup = (actionId: string) => {
+    setPopups((prev) => prev.filter((p) => p.action.action_id !== actionId));
+  };
 
+  useEffect(() => {
     // Sincroniza configurações de popups
     let unlistenSettings = () => {};
     listen<PopupSettingsConfig>('whisper-popup-settings-changed', (event) => {
       if (event.payload) {
         setSettings(event.payload);
+        if (event.payload.popupEnabled === false) {
+          setPopups([]);
+        }
       }
     })
       .then((f) => (unlistenSettings = f))
       .catch(() => {});
 
-    // Escuta evento show_popup_content direcionado exclusivamente à janela de popup pelo Rust backend
+    // Escuta evento do tray para ativar/desativar
+    let unlistenTray = () => {};
+    listen<{ enabled: boolean }>('tray-popups-toggled', (event) => {
+      if (event.payload && event.payload.enabled === false) {
+        setPopups([]);
+      }
+    })
+      .then((f) => (unlistenTray = f))
+      .catch(() => {});
+
+    // Escuta evento show_popup_content
     let unlistenPopupContent = () => {};
     listen<LlmActionTriggered>('show_popup_content', (event) => {
       if (event.payload) {
-        handleAction(event.payload);
+        pushPopup(event.payload);
       }
     })
       .then((f) => (unlistenPopupContent = f))
       .catch(() => {});
 
-    // Escuta evento global de ação disparada pelo LLM como redundância
+    // Escuta evento global de ação disparada pelo LLM
     let unlistenLlmAction = () => {};
     listen<LlmActionTriggered>('llm_action_triggered', (event) => {
       if (event.payload) {
-        handleAction(event.payload);
+        pushPopup(event.payload);
       }
     })
       .then((f) => (unlistenLlmAction = f))
       .catch(() => {});
 
+    // Recupera última ação se houver ao inicializar
+    invoke<LlmActionTriggered | null>('get_current_popup_action')
+      .then((saved) => {
+        if (saved) {
+          pushPopup(saved);
+        }
+      })
+      .catch(() => {});
+
     return () => {
       unlistenSettings();
+      unlistenTray();
       unlistenPopupContent();
       unlistenLlmAction();
-      if (timerRef.current) clearTimeout(timerRef.current);
     };
   }, []);
 
-  const dismissPopup = async () => {
-    setPopup(null);
-    lastActionIdRef.current = null;
-    try {
-      await invoke('hide_corner_popup');
-    } catch {
-      // Ignora erro fora do Tauri
-    }
-  };
-
-  const handleInteractionStrict = async (result: 'accepted' | 'denied') => {
-    if (!popup) return;
+  const handleInteractionStrict = async (actionId: string, result: 'accepted' | 'denied') => {
     try {
       await invoke('submit_popup_interaction', {
-        actionId: popup.action_id,
+        actionId,
         interactionResult: result,
       });
     } catch (e) {
       console.warn('Erro ao submeter interação:', e);
     }
-    await dismissPopup();
+    dismissPopup(actionId);
   };
 
-  const handleCopy = async () => {
-    if (!popup) return;
+  const handleCopy = async (actionId: string, content: string) => {
     try {
-      await navigator.clipboard.writeText(popup.content);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      await navigator.clipboard.writeText(content);
+      setPopups((prev) =>
+        prev.map((item) =>
+          item.action.action_id === actionId ? { ...item, copied: true } : item
+        )
+      );
+      setTimeout(() => {
+        setPopups((prev) =>
+          prev.map((item) =>
+            item.action.action_id === actionId ? { ...item, copied: false } : item
+          )
+        );
+      }, 2000);
     } catch (e) {
       console.warn('Falha ao copiar:', e);
     }
   };
 
-  if (!popup) {
-    return (
-      <div className="popup-window-empty" />
-    );
+  if (popups.length === 0) {
+    return <div className="popup-window-empty" />;
   }
 
   const allPersonas = getStoredPersonas();
-  const persona = allPersonas.find((p) => p.id === popup.persona_id);
-  const personaName = cleanPersonaName(persona?.name || 'Agente');
 
   return (
     <div className="popup-window-wrapper">
-      <div ref={cardRef} className={`popup-card persona-${popup.persona_id} standalone-popup`}>
-        {/* Cabeçalho do Popup */}
-        <div className="popup-card-header" data-tauri-drag-region>
-          <div style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }} data-tauri-drag-region>
+      <div ref={containerRef} className="popup-stack-container">
+        {popups.map(({ action, copied }) => {
+          const persona = allPersonas.find((p) => p.id === action.persona_id);
+          const personaName = cleanPersonaName(persona?.name || 'Agente');
+
+          return (
             <div
-              data-tauri-drag-region
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '5px',
-                userSelect: 'none',
-              }}
+              key={action.action_id}
+              className={`popup-card persona-${action.persona_id} standalone-popup`}
             >
-              <img
-                data-tauri-drag-region
-                src="/logo.svg"
-                alt="WhisperAgent"
-                style={{
-                  height: '14px',
-                  width: 'auto',
-                  pointerEvents: 'none',
-                  filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.3))',
-                }}
+              {/* Cabeçalho do Popup */}
+              <div className="popup-card-header" data-tauri-drag-region>
+                <div
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}
+                  data-tauri-drag-region
+                >
+                  <div
+                    data-tauri-drag-region
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '5px',
+                      userSelect: 'none',
+                    }}
+                  >
+                    <img
+                      data-tauri-drag-region
+                      src="/logo.svg"
+                      alt="WhisperAgent"
+                      style={{
+                        height: '14px',
+                        width: 'auto',
+                        pointerEvents: 'none',
+                        filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.3))',
+                      }}
+                    />
+                    <img
+                      data-tauri-drag-region
+                      src="/nametext-logo.svg"
+                      alt="WhisperAgent"
+                      style={{
+                        height: '10px',
+                        width: 'auto',
+                        pointerEvents: 'none',
+                        opacity: 0.9,
+                      }}
+                    />
+                  </div>
+                  <span
+                    data-tauri-drag-region
+                    style={{ color: 'rgba(255,255,255,0.2)', fontSize: '11px' }}
+                  >
+                    |
+                  </span>
+                  <div className="popup-badge" data-tauri-drag-region>
+                    {renderPersonaIcon(action.persona_id)}
+                    <span>{personaName}</span>
+                  </div>
+                </div>
+
+                <div className="popup-header-actions">
+                  <button
+                    type="button"
+                    className="popup-icon-btn"
+                    onClick={() => handleCopy(action.action_id, action.content)}
+                    title={copied ? 'Copiado!' : 'Copiar resposta'}
+                  >
+                    {copied ? <Check size={13} /> : <Copy size={13} />}
+                  </button>
+                  <button
+                    type="button"
+                    className="popup-icon-btn close"
+                    onClick={() => dismissPopup(action.action_id)}
+                    title="Fechar (Dispensar)"
+                  >
+                    <X size={13} />
+                  </button>
+                </div>
+              </div>
+
+              {/* Conteúdo textual formatado em Markdown */}
+              <MarkdownViewer
+                content={action.content}
+                className="popup-card-content standalone-scroll"
               />
-              <img
-                data-tauri-drag-region
-                src="/nametext-logo.svg"
-                alt="WhisperAgent"
-                style={{
-                  height: '10px',
-                  width: 'auto',
-                  pointerEvents: 'none',
-                  opacity: 0.9,
-                }}
-              />
+
+              {/* Ações interativas se exigidas */}
+              {action.requires_interaction && (
+                <div className="popup-actions-row">
+                  <button
+                    type="button"
+                    className="popup-btn-accept"
+                    onClick={() => handleInteractionStrict(action.action_id, 'accepted')}
+                  >
+                    <Check size={13} style={{ marginRight: '4px' }} /> Aceitar
+                  </button>
+                  <button
+                    type="button"
+                    className="popup-btn-deny"
+                    onClick={() => handleInteractionStrict(action.action_id, 'denied')}
+                  >
+                    <X size={13} style={{ marginRight: '4px' }} /> Negar
+                  </button>
+                </div>
+              )}
             </div>
-            <span data-tauri-drag-region style={{ color: 'rgba(255,255,255,0.2)', fontSize: '11px' }}>|</span>
-            <div className="popup-badge" data-tauri-drag-region>
-              {renderPersonaIcon(popup.persona_id)}
-              <span>{personaName}</span>
-            </div>
-          </div>
-
-          <div className="popup-header-actions">
-            <button
-              type="button"
-              className="popup-icon-btn"
-              onClick={handleCopy}
-              title={copied ? 'Copiado!' : 'Copiar resposta'}
-            >
-              {copied ? <Check size={13} /> : <Copy size={13} />}
-            </button>
-            <button
-              type="button"
-              className="popup-icon-btn close"
-              onClick={dismissPopup}
-              title="Fechar (Dispensar)"
-            >
-              <X size={13} />
-            </button>
-          </div>
-        </div>
-
-        {/* Conteúdo textual formatado em Markdown */}
-        <MarkdownViewer
-          content={popup.content}
-          className="popup-card-content standalone-scroll"
-        />
-
-        {/* Ações interativas se exigidas */}
-        {popup.requires_interaction && (
-          <div className="popup-actions-row">
-            <button
-              type="button"
-              className="popup-btn-accept"
-              onClick={() => handleInteractionStrict('accepted')}
-            >
-              <Check size={13} style={{ marginRight: '4px' }} /> Aceitar
-            </button>
-            <button
-              type="button"
-              className="popup-btn-deny"
-              onClick={() => handleInteractionStrict('denied')}
-            >
-              <X size={13} style={{ marginRight: '4px' }} /> Negar
-            </button>
-          </div>
-        )}
+          );
+        })}
       </div>
     </div>
   );
