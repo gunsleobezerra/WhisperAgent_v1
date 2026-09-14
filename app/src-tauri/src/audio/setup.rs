@@ -27,6 +27,12 @@ pub fn get_model_config(name: &str) -> ModelConfig {
             url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin",
             size_bytes: 77_700_000, // ~75 MB
         }
+    } else if lower.contains("large") {
+        ModelConfig {
+            filename: "ggml-large-v3-q5_0.bin",
+            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-q5_0.bin",
+            size_bytes: 1_120_000_000, // ~1.1 GB
+        }
     } else {
         ModelConfig {
             filename: "ggml-base.bin",
@@ -72,6 +78,7 @@ pub fn download_model_if_needed(app: &AppHandle, name: &str) -> Result<PathBuf, 
     if path.exists() && path.metadata().map(|m| m.len()).unwrap_or(0) > (cfg.size_bytes / 2) {
         log::info!("[Whisper Setup] Modelo '{}' já existe localmente: {:?}", cfg.filename, path);
         let _ = app.emit("whisper_model_download", DownloadEvent {
+            id: name.to_string(),
             status: "ready".into(),
             progress: 100,
             message: format!("Modelo Whisper {} pronto!", name),
@@ -85,6 +92,7 @@ pub fn download_model_if_needed(app: &AppHandle, name: &str) -> Result<PathBuf, 
 
     let friendly_size = format!("~{:.0} MB", cfg.size_bytes as f64 / (1024.0 * 1024.0));
     let _ = app.emit("whisper_model_download", DownloadEvent {
+            id: name.to_string(),
         status: "downloading".into(),
         progress: 0,
         message: format!("Baixando Whisper {} ({})...", name.to_uppercase(), friendly_size),
@@ -100,6 +108,7 @@ pub fn download_model_if_needed(app: &AppHandle, name: &str) -> Result<PathBuf, 
         .send()
         .map_err(|e| {
             let _ = app.emit("whisper_model_download", DownloadEvent {
+            id: name.to_string(),
                 status: "error".into(),
                 progress: 0,
                 message: format!("Erro ao conectar para baixar modelo: {}", e),
@@ -110,6 +119,7 @@ pub fn download_model_if_needed(app: &AppHandle, name: &str) -> Result<PathBuf, 
     use std::io::{Read, Write};
     let mut file = std::fs::File::create(&path).map_err(|e| {
         let _ = app.emit("whisper_model_download", DownloadEvent {
+            id: name.to_string(),
             status: "error".into(),
             progress: 0,
             message: format!("Erro ao criar arquivo: {}", e),
@@ -135,10 +145,13 @@ pub fn download_model_if_needed(app: &AppHandle, name: &str) -> Result<PathBuf, 
 
                 if pct != last_reported_pct {
                     last_reported_pct = pct;
+                    let downloaded_mb = downloaded as f64 / 1_048_576.0;
+                    let total_mb = cfg.size_bytes as f64 / 1_048_576.0;
                     let _ = app.emit("whisper_model_download", DownloadEvent {
+            id: name.to_string(),
                         status: "downloading".into(),
                         progress: pct as u32,
-                        message: format!("Baixando Whisper {}... {}%", name.to_uppercase(), pct),
+                        message: format!("Baixando Whisper {}... {}% ({:.1} MB / {:.1} MB)", name.to_uppercase(), pct, downloaded_mb, total_mb),
                     });
                 }
             }
@@ -153,6 +166,7 @@ pub fn download_model_if_needed(app: &AppHandle, name: &str) -> Result<PathBuf, 
     if final_size > (cfg.size_bytes / 2) {
         log::info!("[Whisper Setup] Download concluído com sucesso: {:?}", path);
         let _ = app.emit("whisper_model_download", DownloadEvent {
+            id: name.to_string(),
             status: "ready".into(),
             progress: 100,
             message: format!("Modelo Whisper {} pronto!", name.to_uppercase()),
@@ -161,6 +175,7 @@ pub fn download_model_if_needed(app: &AppHandle, name: &str) -> Result<PathBuf, 
     } else {
         let _ = std::fs::remove_file(&path);
         let _ = app.emit("whisper_model_download", DownloadEvent {
+            id: name.to_string(),
             status: "error".into(),
             progress: 0,
             message: "Download incompleto. Tente novamente.".into(),
@@ -178,6 +193,7 @@ pub fn ensure_model(app: AppHandle) {
 
 #[derive(Clone, serde::Serialize)]
 pub struct DownloadEvent {
+    pub id: String,
     pub status: String,
     pub progress: u32,
     pub message: String,

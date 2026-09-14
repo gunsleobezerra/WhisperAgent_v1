@@ -28,7 +28,6 @@ import {
   Check,
   Trash2,
   MessageSquare,
-  Copy,
   Save,
   RotateCcw,
   KeyRound,
@@ -43,12 +42,13 @@ import {
   Bot,
   Bell,
   LayoutTemplate,
-  Monitor,
   Search,
   Type,
   RefreshCw,
   CheckCircle2,
   AlertCircle,
+  Monitor,
+  Blocks,
 } from 'lucide-react';
 import {
   ThemeConfig,
@@ -83,6 +83,7 @@ import {
   saveStoredActivePersonaId,
   cleanPersonaName,
 } from '../types/persona';
+import { McpServerConfig } from '../types/mcp';
 
 function renderPersonaIcon(id: string) {
   switch (id) {
@@ -121,7 +122,7 @@ interface AudioLevelEvent {
   is_speaking: boolean;
 }
 
-type TabKey = 'audio' | 'transcription' | 'personas' | 'llm' | 'overlay' | 'popups' | 'theme' | 'about';
+type TabKey = 'audio' | 'transcription' | 'personas' | 'plugins' | 'llm' | 'overlay' | 'popups' | 'theme' | 'about';
 
 interface NavTabItem {
   id: TabKey;
@@ -152,6 +153,13 @@ const NAV_TABS: NavTabItem[] = [
     icon: Users,
     title: 'Personas & Perfis Especializados',
     subtitle: 'Assistentes inteligentes, prompts customizados e ferramentas integradas',
+  },
+  {
+    id: 'plugins',
+    label: 'Skills & Plugins',
+    icon: Blocks,
+    title: 'Integrações Externas (MCP)',
+    subtitle: 'Conecte bancos de dados, arquivos e ferramentas externas usando Model Context Protocol',
   },
   {
     id: 'llm',
@@ -247,9 +255,9 @@ const SETTINGS_SEARCH_INDEX: SearchConfigItem[] = [
   {
     id: 'transcription-model',
     tab: 'transcription',
-    title: 'Modelo Whisper (tiny, base, small, medium)',
+    title: 'Modelo Whisper (tiny, base, small, medium, large)',
     description: 'Alterne o peso do modelo GGML para balancear precisão e uso de CPU.',
-    keywords: ['modelo', 'whisper', 'tiny', 'base', 'small', 'medium', 'ggml', 'pesos', 'precisao', 'cpu'],
+    keywords: ['modelo', 'whisper', 'tiny', 'base', 'small', 'medium', 'large', 'ggml', 'pesos', 'precisao', 'cpu'],
   },
   {
     id: 'transcription-llm-correction',
@@ -473,6 +481,7 @@ export function SettingsWindow() {
 
   // Configurações de Transcrição
   const [transcriptionMode, setTranscriptionMode] = useState<string>(() => localStorage.getItem('transcription_mode') || 'whisper');
+  const [transcriptionLanguage, setTranscriptionLanguage] = useState<string>(() => localStorage.getItem('transcription_language') || 'pt');
   const [whisperModel, setWhisperModel] = useState<string>(() => localStorage.getItem('whisper_model') || 'tiny');
   const [llmCorrectionEnabled, setLlmCorrectionEnabled] = useState<boolean>(() => {
     const saved = localStorage.getItem('llm_correction_enabled');
@@ -629,6 +638,13 @@ export function SettingsWindow() {
     return list.find((p) => p.id === actId) || list[0] || DEFAULT_PERSONAS[0];
   });
 
+  // Configurações de Skills & Plugins (MCP)
+  const [mcpServers, setMcpServers] = useState<McpServerConfig[]>([]);
+  const [isAddingPlugin, setIsAddingPlugin] = useState(false);
+  const [newPluginName, setNewPluginName] = useState('');
+  const [newPluginCommand, setNewPluginCommand] = useState('');
+  const [newPluginArgs, setNewPluginArgs] = useState('');
+
   const filteredPersonas = useMemo(() => {
     const query = personaSearchQuery.trim().toLowerCase();
     return personas.filter((p) => {
@@ -755,6 +771,11 @@ export function SettingsWindow() {
             if (bufSettings.partial_interval_seconds) setPartialIntervalSeconds(bufSettings.partial_interval_seconds);
           }
         })
+        .catch(() => {});
+
+      // Sincroniza Plugins MCP
+      invoke<McpServerConfig[]>('get_mcp_servers')
+        .then((servers) => setMcpServers(servers || []))
         .catch(() => {});
     } catch (e) {
       console.warn('Ambiente web (sem Tauri) detectado:', e);
@@ -1005,6 +1026,7 @@ export function SettingsWindow() {
       trigger_mode: 'always',
       hotword: '',
       enabled_tools: ['popup'],
+      auto_approve_tools: ['popup'],
       temperature: 0.5,
       is_preset: false,
     };
@@ -1015,6 +1037,42 @@ export function SettingsWindow() {
     setEditingPersona(newPersona);
     setStatusMsg('Nova persona criada! Edite os detalhes abaixo.');
     setTimeout(() => setStatusMsg(''), 3000);
+  };
+
+  const handleSavePlugin = async () => {
+    if (!newPluginName.trim() || !newPluginCommand.trim()) return;
+
+    const newPlugin: McpServerConfig = {
+      id: `mcp_${Date.now()}`,
+      name: newPluginName.trim(),
+      command: newPluginCommand.trim(),
+      args: newPluginArgs.split(' ').map(a => a.trim()).filter(Boolean),
+      env: {}
+    };
+
+    try {
+      await invoke('save_mcp_server', { server: newPlugin });
+      setMcpServers([...mcpServers, newPlugin]);
+      setIsAddingPlugin(false);
+      setNewPluginName('');
+      setNewPluginCommand('');
+      setNewPluginArgs('');
+      setStatusMsg('Plugin MCP adicionado com sucesso!');
+      setTimeout(() => setStatusMsg(''), 3000);
+    } catch (e) {
+      console.error('Falha ao salvar plugin MCP:', e);
+    }
+  };
+
+  const handleDeletePlugin = async (id: string) => {
+    try {
+      await invoke('delete_mcp_server', { id });
+      setMcpServers(mcpServers.filter((s) => s.id !== id));
+      setStatusMsg('Plugin excluído!');
+      setTimeout(() => setStatusMsg(''), 3000);
+    } catch (e) {
+      console.error('Falha ao deletar plugin MCP:', e);
+    }
   };
 
   const handleDeletePersona = (idToDelete: string) => {
@@ -1062,12 +1120,26 @@ export function SettingsWindow() {
     });
   };
 
+  const handleToggleAutoApproveTool = (toolName: string) => {
+    const currentTools = editingPersona.auto_approve_tools || [];
+    const hasTool = currentTools.includes(toolName);
+    const updatedTools = hasTool
+      ? currentTools.filter((t) => t !== toolName)
+      : [...currentTools, toolName];
+
+    setEditingPersona({
+      ...editingPersona,
+      auto_approve_tools: updatedTools,
+    });
+  };
+
   const handleSave = async () => {
     try {
       setStatusMsg('Salvando preferências...');
       localStorage.setItem('active_source_id', activeSourceId);
       localStorage.setItem('audio_mute', String(audioMute));
       localStorage.setItem('transcription_mode', transcriptionMode);
+      localStorage.setItem('transcription_language', transcriptionLanguage);
       localStorage.setItem('whisper_model', whisperModel);
       localStorage.setItem('byok_endpoint', byokEndpoint);
       localStorage.setItem('byok_key', byokApiKey);
@@ -1084,48 +1156,29 @@ export function SettingsWindow() {
       saveStoredPersonas(updatedPersonas);
       saveStoredActivePersonaId(activePersonaId);
 
-      try {
-        await emit('whisper-overlay-resize', { width: overlayWidth, height: overlayHeight });
-      } catch (e) {}
+      // Atualiza estado visual imediatamente
+      setStatusMsg('Salvo com sucesso!');
+      setTimeout(() => setStatusMsg(''), 3000);
 
-      try {
-        await emit('whisper-overlay-opacity', { opacity: overlayOpacity });
-      } catch (e) {}
+      // Dispara integrações com o backend em background
+      (async () => {
+        try { await emit('whisper-overlay-resize', { width: overlayWidth, height: overlayHeight }); } catch (e) {}
+        try { await emit('whisper-overlay-opacity', { opacity: overlayOpacity }); } catch (e) {}
+        try { await emit('whisper-overlay-font-size', { fontSize: overlayFontSize }); } catch (e) {}
+        try { await emit('audio_source_changed', { deviceId: activeSourceId }); } catch (e) {}
+        try { await emit('whisper-settings-saved', {}); } catch (e) {}
 
-      try {
-        await emit('whisper-overlay-font-size', { fontSize: overlayFontSize });
-      } catch (e) {}
+        await saveAndBroadcastTheme(currentTheme).catch(() => {});
 
-      try {
-        await emit('audio_source_changed', { deviceId: activeSourceId });
-      } catch (e) {}
-
-      try {
-        await emit('whisper-settings-saved', {});
-      } catch (e) {}
-
-      // Salva e transmite tema
-      await saveAndBroadcastTheme(currentTheme);
-
-      // Sincroniza a persona ativa com o backend
-      const activeObj = updatedPersonas.find((p) => p.id === activePersonaId) || editingPersona;
-      try {
-        await invoke('set_active_persona', { persona: activeObj });
-      } catch (e) {
-        console.warn('Erro ao definir persona ativa:', e);
-      }
-
-      try {
-        await invoke('set_whisper_model', { modelName: whisperModel });
-      } catch (e) {
-        console.warn('Erro ao definir modelo whisper:', e);
-      }
-
-      try {
-        await invoke('update_settings_state', {
+        const activeObj = updatedPersonas.find((p) => p.id === activePersonaId) || editingPersona;
+        invoke('set_active_persona', { persona: activeObj }).catch(console.warn);
+        invoke('set_whisper_model', { modelName: whisperModel }).catch(console.warn);
+        
+        invoke('update_settings_state', {
           audioMute,
           activeSourceId,
           transcriptionMode,
+          transcriptionLanguage,
           uiTheme: currentTheme.id,
           overlayOpacity,
           overlayMonitorId: 0,
@@ -1133,24 +1186,16 @@ export function SettingsWindow() {
           byokEndpoint,
           byokApiKey,
           llmCorrectionEnabled,
-        });
-      } catch (e) {
-        console.warn(e);
-      }
+        }).catch(console.warn);
 
-      try {
-        await invoke('start_audio_capture', {
+        invoke('start_audio_capture', {
           deviceId: activeSourceId,
           sampleRate: 16000,
           channels: 1,
           format: 'f32',
-        });
-      } catch (e) {
-        console.warn('Erro ao reiniciar audio capture:', e);
-      }
+        }).catch(console.warn);
+      })();
 
-      setStatusMsg('Salvo com sucesso!');
-      setTimeout(() => setStatusMsg(''), 3000);
     } catch (e) {
       console.error(e);
       setStatusMsg('Salvo localmente!');
@@ -1876,6 +1921,20 @@ export function SettingsWindow() {
             </div>
 
             <div className="form-group">
+              <label className="form-label">Idioma da Transcrição</label>
+              <select
+                className="form-select"
+                value={transcriptionLanguage}
+                onChange={(e) => setTranscriptionLanguage(e.target.value)}
+              >
+                <option value="auto">Automático (Detectar idioma falado)</option>
+                <option value="pt">Português (Brasil)</option>
+                <option value="en">Inglês (Estados Unidos)</option>
+                <option value="es">Espanhol</option>
+              </select>
+            </div>
+
+            <div className="form-group">
               <label className="form-label">Modelo Whisper Local</label>
               <select
                 className="form-select"
@@ -1886,6 +1945,7 @@ export function SettingsWindow() {
                 <option value="base-q5_1">Base Q5_1 (~57 MB - Rápido + Alta Precisão em Português)</option>
                 <option value="tiny">Tiny (~75 MB - Não quantizado)</option>
                 <option value="base">Base (~148 MB - Não quantizado)</option>
+                <option value="large-v3-q5_0">Large v3 Q5_0 (~1.1 GB - Alta Fidelidade com Menos Memória)</option>
               </select>
             </div>
 
@@ -1999,7 +2059,7 @@ export function SettingsWindow() {
                 {/* Categorias Rápidas */}
                 <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap', alignItems: 'center' }}>
                   {[
-                    { id: 'all', label: 'Todas (50+)' },
+                    { id: 'all', label: 'Todas' },
                     { id: 'productivity', label: 'Produtividade' },
                     { id: 'dev', label: 'Desenvolvimento' },
                     { id: 'business', label: 'Reuniões & Negócios' },
@@ -2256,29 +2316,91 @@ export function SettingsWindow() {
                 />
               </div>
 
-              <div className="form-group">
-                <label className="form-label">Ferramentas Habilitadas para esta Persona</label>
-                <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
-                  <label className="form-checkbox">
-                    <input
-                      type="checkbox"
-                      checked={editingPersona.enabled_tools?.includes('popup') ?? true}
-                      onChange={() => handleToggleTool('popup')}
-                    />
-                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px' }}>
-                      <MessageSquare size={13} /> Popups no HUD Overlay
-                    </span>
-                  </label>
-                  <label className="form-checkbox">
-                    <input
-                      type="checkbox"
-                      checked={editingPersona.enabled_tools?.includes('clipboard') ?? false}
-                      onChange={() => handleToggleTool('clipboard')}
-                    />
-                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px' }}>
-                      <Copy size={13} /> Botão de Cópia Rápida
-                    </span>
-                  </label>
+              <div className="form-group" style={{ marginBottom: '20px' }}>
+                <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <Layers size={14} /> Ferramentas Disponíveis & Aprovação Automática
+                </label>
+                <p style={{ fontSize: '11px', color: 'var(--text-secondary)', marginBottom: '12px' }}>
+                  Marque a caixa à esquerda para <strong>ativar a ferramenta</strong> nesta persona.
+                  Marque o escudo à direita (Auto-Approve) para <strong>permitir execução sem perguntar</strong> (recomendado apenas para leitura).
+                </p>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                  
+                  {/* POPUP HUD */}
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 12px', background: 'rgba(255, 255, 255, 0.03)', borderRadius: '6px', border: '1px solid var(--border-color)' }}>
+                    <label className="form-checkbox" style={{ margin: 0 }}>
+                      <input
+                        type="checkbox"
+                        checked={editingPersona.enabled_tools?.includes('show_popup') ?? true}
+                        onChange={() => handleToggleTool('show_popup')}
+                      />
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px' }}>
+                        <MessageSquare size={13} /> Notificações Visuais no HUD
+                      </span>
+                    </label>
+                    <label className="form-checkbox" style={{ margin: 0, opacity: editingPersona.enabled_tools?.includes('show_popup') ? 1 : 0.4 }}>
+                      <input
+                        type="checkbox"
+                        checked={editingPersona.auto_approve_tools?.includes('show_popup') ?? true}
+                        onChange={() => handleToggleAutoApproveTool('show_popup')}
+                        disabled={!editingPersona.enabled_tools?.includes('show_popup')}
+                      />
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '10px', color: 'var(--text-secondary)' }}>
+                        <ShieldCheck size={12} color="var(--accent-color)" /> Auto-Approve
+                      </span>
+                    </label>
+                  </div>
+
+                  {/* WEB SEARCH */}
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 12px', background: 'rgba(255, 255, 255, 0.03)', borderRadius: '6px', border: '1px solid var(--border-color)' }}>
+                    <label className="form-checkbox" style={{ margin: 0 }}>
+                      <input
+                        type="checkbox"
+                        checked={editingPersona.enabled_tools?.includes('web_search') ?? false}
+                        onChange={() => handleToggleTool('web_search')}
+                      />
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px' }}>
+                        <Search size={13} /> Busca Rápida na Web (DuckDuckGo)
+                      </span>
+                    </label>
+                    <label className="form-checkbox" style={{ margin: 0, opacity: editingPersona.enabled_tools?.includes('web_search') ? 1 : 0.4 }}>
+                      <input
+                        type="checkbox"
+                        checked={editingPersona.auto_approve_tools?.includes('web_search') ?? false}
+                        onChange={() => handleToggleAutoApproveTool('web_search')}
+                        disabled={!editingPersona.enabled_tools?.includes('web_search')}
+                      />
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '10px', color: 'var(--text-secondary)' }}>
+                        <ShieldCheck size={12} color="var(--accent-color)" /> Auto-Approve
+                      </span>
+                    </label>
+                  </div>
+
+                  {/* EXECUTE COMMAND */}
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 12px', background: 'rgba(255, 255, 255, 0.03)', borderRadius: '6px', border: '1px solid var(--border-color)' }}>
+                    <label className="form-checkbox" style={{ margin: 0 }}>
+                      <input
+                        type="checkbox"
+                        checked={editingPersona.enabled_tools?.includes('execute_command') ?? false}
+                        onChange={() => handleToggleTool('execute_command')}
+                      />
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', color: editingPersona.enabled_tools?.includes('execute_command') ? '#f87171' : 'inherit' }}>
+                        <Code2 size={13} /> Execução de Scripts (PowerShell/Bash)
+                      </span>
+                    </label>
+                    <label className="form-checkbox" style={{ margin: 0, opacity: editingPersona.enabled_tools?.includes('execute_command') ? 1 : 0.4 }}>
+                      <input
+                        type="checkbox"
+                        checked={editingPersona.auto_approve_tools?.includes('execute_command') ?? false}
+                        onChange={() => handleToggleAutoApproveTool('execute_command')}
+                        disabled={!editingPersona.enabled_tools?.includes('execute_command')}
+                      />
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '10px', color: 'var(--text-secondary)' }}>
+                        <ShieldCheck size={12} color="var(--accent-color)" /> Auto-Approve
+                      </span>
+                    </label>
+                  </div>
+
                 </div>
               </div>
 
@@ -2311,6 +2433,116 @@ export function SettingsWindow() {
                   <RotateCcw size={12} /> Restaurar Padrões de Fábrica
                 </button>
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* ABA: SKILLS & PLUGINS (MCP) */}
+        {activeTab === 'plugins' && (
+          <div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+              <div>
+                <strong style={{ fontSize: '13px' }}>Integrações MCP (Model Context Protocol)</strong>
+                <p style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                  Conecte ferramentas externas como bancos de dados, GitHub, Slack e sistemas corporativos.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => setIsAddingPlugin(true)}
+                style={{ fontSize: '11px', padding: '6px 12px', display: 'flex', alignItems: 'center', gap: '6px' }}
+              >
+                <Plus size={14} /> Novo Plugin
+              </button>
+            </div>
+
+            {isAddingPlugin && (
+              <div className="persona-editor-box" style={{ marginBottom: '16px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                  <strong>Adicionar Servidor MCP</strong>
+                  <button type="button" onClick={() => setIsAddingPlugin(false)} style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer' }}>
+                    <X size={14} />
+                  </button>
+                </div>
+                
+                <div className="form-group">
+                  <label className="form-label">Nome de Exibição</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    value={newPluginName}
+                    onChange={(e) => setNewPluginName(e.target.value)}
+                    placeholder="Ex: GitHub, PostgreSQL Local"
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label className="form-label">Comando de Execução</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    value={newPluginCommand}
+                    onChange={(e) => setNewPluginCommand(e.target.value)}
+                    placeholder="Ex: npx"
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label className="form-label">Argumentos (separados por espaço)</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    value={newPluginArgs}
+                    onChange={(e) => setNewPluginArgs(e.target.value)}
+                    placeholder="Ex: -y @modelcontextprotocol/server-postgres postgres://user:pass@localhost/db"
+                  />
+                </div>
+
+                <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '12px' }}>
+                  <button type="button" className="btn-primary" onClick={handleSavePlugin} style={{ fontSize: '12px', padding: '6px 14px' }}>
+                    Salvar Plugin
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              {mcpServers.length === 0 && !isAddingPlugin ? (
+                <div style={{ textAlign: 'center', padding: '30px', color: 'var(--text-secondary)', fontSize: '12px', background: 'rgba(255, 255, 255, 0.02)', borderRadius: '8px', border: '1px dashed var(--border-color)' }}>
+                  Nenhum plugin MCP configurado. Clique em "Novo Plugin" para integrar ferramentas externas.
+                </div>
+              ) : (
+                mcpServers.map((server) => (
+                  <div key={server.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', background: 'rgba(255, 255, 255, 0.03)', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
+                    <div>
+                      <strong style={{ fontSize: '13px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <Blocks size={14} color="var(--accent-color)" /> {server.name}
+                      </strong>
+                      <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '4px', fontFamily: 'monospace' }}>
+                        {server.command} {server.args.join(' ')}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      onClick={() => handleDeletePlugin(server.id)}
+                      style={{ padding: '6px', color: '#f87171', borderColor: 'rgba(248, 113, 113, 0.3)' }}
+                      title="Remover Plugin"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+
+            <div className="info-box" style={{ marginTop: '16px' }}>
+              <strong style={{ display: 'inline-flex', alignItems: 'center', gap: '5px' }}>
+                <Info size={13} /> Como Funciona?
+              </strong>{' '}
+              Quando você adiciona um servidor MCP, o WhisperAgent vai extrair as skills que esse servidor disponibiliza. 
+              Em seguida, essas novas skills estarão disponíveis na aba <strong>Personas</strong> para você habilitar e usar livremente!
             </div>
           </div>
         )}

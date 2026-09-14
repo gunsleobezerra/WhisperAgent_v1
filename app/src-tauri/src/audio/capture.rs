@@ -383,7 +383,6 @@ pub async fn start_audio_capture(
         let mut speech_buffer: Vec<f32> = Vec::new();
         let mut pre_roll_buffer: std::collections::VecDeque<f32> = std::collections::VecDeque::new();
         let max_preroll_samples = (src_rate * 0.30) as usize; // ~300ms de pre-roll para não cortar início
-        let silence_threshold_samples = (src_rate * 0.35) as usize; // ~350ms de silêncio para fechar sentença com baixa latência
         let min_speech_samples = (src_rate * 0.25) as usize; // Mínimo 250ms de áudio para acionar o Whisper
 
         let mut silence_samples = 0usize;

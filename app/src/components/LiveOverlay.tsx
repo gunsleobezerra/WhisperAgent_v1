@@ -71,6 +71,7 @@ interface TranscriptionCorrected {
 }
 
 interface DownloadEvent {
+  id: string;
   status: string;   // 'downloading' | 'ready' | 'error'
   progress: number; // 0-100
   message: string;
@@ -146,12 +147,15 @@ function mergeStreamingText(existing: string, incoming: string): string {
 export function LiveOverlay() {
   // Histórico acumulado de frases finalizadas na janela
   const [segments, setSegments] = useState<TranscriptionSegment[]>([]);
-  const [livePartialText, setLivePartialText] = useState('');
+  const [livePartialText, setLivePartialText] = useState<string>('');
+  const [downloads, setDownloads] = useState<Record<string, DownloadEvent>>({});
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [status, setStatus] = useState('Inicializando...');
   const [isListening, setIsListening] = useState(false);
-  const [modelDownload, setModelDownload] = useState<DownloadEvent | null>(null);
   const [debugInfo, setDebugInfo] = useState('');
+  const [whisperModel, setWhisperModel] = useState<string>(() => {
+    return localStorage.getItem('whisper_model') || 'tiny-q5_1';
+  });
   const [audioDevices, setAudioDevices] = useState<AudioDevice[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>(() => {
     return localStorage.getItem('active_source_id') || 'default';
@@ -231,6 +235,7 @@ export function LiveOverlay() {
 
         const savedWhisperModel = localStorage.getItem('whisper_model');
         if (savedWhisperModel) {
+          setWhisperModel(savedWhisperModel);
           invoke('set_whisper_model', { modelName: savedWhisperModel }).catch(() => {});
         }
 
@@ -267,6 +272,7 @@ export function LiveOverlay() {
       const savedModel = localStorage.getItem('byok_model');
       const savedCorrection = localStorage.getItem('llm_correction_enabled');
       const savedTranscriptionMode = localStorage.getItem('transcription_mode');
+      const savedTranscriptionLanguage = localStorage.getItem('transcription_language');
       const savedAudioMute = localStorage.getItem('audio_mute');
       const savedWhisperModel = localStorage.getItem('whisper_model');
       const isCorr = savedCorrection !== null ? savedCorrection === 'true' : true;
@@ -274,6 +280,7 @@ export function LiveOverlay() {
       invoke('update_settings_state', {
         audioMute: savedAudioMute === 'true',
         transcriptionMode: savedTranscriptionMode || 'whisper',
+        transcriptionLanguage: savedTranscriptionLanguage || 'pt',
         selectedLlmId: savedModel,
         byokEndpoint: savedEndpoint,
         byokApiKey: savedKey,
@@ -322,12 +329,27 @@ export function LiveOverlay() {
     // Listener do progresso de download do modelo Whisper (primeiro boot)
     listen<DownloadEvent>('whisper_model_download', (event) => {
       const d = event.payload;
-      if (d.status === 'ready') {
-        setModelDownload(null);
-      } else {
-        setModelDownload(d);
-      }
+      setDownloads(prev => {
+        const next = { ...prev };
+        if (d.status === 'ready') {
+          delete next[d.id];
+        } else {
+          next[d.id] = d;
+        }
+        return next;
+      });
     }).then((f) => (unlistenDownload = f)).catch(() => {});
+
+    // Feedback visual quando uma ferramenta (como web_search) estiver executando em background
+    listen<{ tool: string; message: string }>('tool_running', (event) => {
+      setStatus(event.payload.message);
+      setDebugInfo(`tool: ${event.payload.tool}`);
+    }).catch(() => {});
+
+    listen('tool_finished', () => {
+      setStatus('Pronto');
+      setDebugInfo('');
+    }).catch(() => {});
 
     // Listener de refinamento / correção gramatical recebida da IA
     listen<TranscriptionCorrected>('stt_transcription_corrected', (event) => {
@@ -750,7 +772,10 @@ export function LiveOverlay() {
               fontWeight: isSpeaking ? 600 : 400,
             }}
           >
-            {isSpeaking ? '● Ouvindo voz...' : (isListening ? '○ Aguardando fala' : `○ ${status}`)}
+            {isSpeaking ? '🗣️ Ouvindo voz...' : (isListening ? '🎙️ Aguardando fala' : `🎙️ ${status}`)}
+            <span style={{ marginLeft: '6px', opacity: 0.7, borderLeft: '1px solid rgba(255,255,255,0.2)', paddingLeft: '6px' }}>
+              {whisperModel.toUpperCase()}
+            </span>
           </span>
         </div>
 
@@ -824,22 +849,27 @@ export function LiveOverlay() {
           paddingRight: '4px'
         }}
       >
-        {modelDownload ? (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-            <span style={{ fontSize: '12px', color: modelDownload.status === 'error' ? 'var(--text-secondary, #a1a1aa)' : 'var(--text-primary, #ffffff)' }}>
-              {modelDownload.message}
-            </span>
-            {modelDownload.status === 'downloading' && (
-              <div style={{ background: 'rgba(255,255,255,0.15)', borderRadius: '4px', height: '6px', overflow: 'hidden' }}>
-                <div style={{
-                  width: `${modelDownload.progress}%`,
-                  height: '100%',
-                  background: 'linear-gradient(90deg, #52525b, #ffffff)',
-                  borderRadius: '4px',
-                  transition: 'width 0.3s ease'
-                }} />
+        {Object.values(downloads).length > 0 ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', width: '100%' }}>
+            {Object.values(downloads).map(dl => (
+              <div key={dl.id} style={{ display: 'flex', flexDirection: 'column', gap: '4px', width: '100%' }}>
+                <span style={{ fontSize: '12px', color: dl.status === 'error' ? 'var(--text-secondary, #a1a1aa)' : 'var(--text-primary, #ffffff)' }}>
+                  {dl.message}
+                </span>
+                {dl.status === 'downloading' && (
+                  <div style={{ width: '100%', height: '3px', background: 'rgba(255, 255, 255, 0.1)', borderRadius: '2px', overflow: 'hidden' }}>
+                    <div
+                      style={{
+                        height: '100%',
+                        width: `${dl.progress}%`,
+                        background: 'var(--accent-color, #a855f7)',
+                        transition: 'width 0.2s ease-out'
+                      }}
+                    />
+                  </div>
+                )}
               </div>
-            )}
+            ))}
           </div>
         ) : (
           (segments.length > 0 || livePartialText || (popupSettings.displayMode === 'inline' && inlineAction)) ? (

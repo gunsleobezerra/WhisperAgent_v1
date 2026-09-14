@@ -1,0 +1,59 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "web_search",
+      "description": "Busca dados, fatos atuais e notícias na internet. Use quando não tiver a informação atualizada na memória ou quando o usuário solicitar informações recentes do mundo real.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Termo de busca otimizado para o mecanismo de busca (ex: 'notícias tecnologia hoje', 'cotação dólar atual')."
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "show_popup",
+      "description": "Renderiza um balão de notificação (popup) no overlay do usuário com informações urgentes ou ações pontuais. Use para exibir correções curtas ou informações pontuais fora do fluxo contínuo.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string",
+            "description": "A mensagem curta em markdown para mostrar ao usuário."
+          }
+        },
+        "required": [
+          "message"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "execute_command",
+      "description": "Executa um comando no sistema operacional hospedeiro (PowerShell no Windows, Bash no macOS/Linux) e retorna a saída (stdout/stderr). IMPORTANTE: Somente comandos não interativos. Para comandos que demoram, o sistema aguardará até finalizar.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "O script ou comando nativo a ser executado."
+          }
+        },
+        "required": [
+          "command"
+        ]
+      }
+    }
+  }
+]

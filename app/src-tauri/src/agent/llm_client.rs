@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use reqwest::Client;
 use serde_json::Value;
 use std::time::Duration;
+use tauri::Emitter;
 use crate::agent::core::{ByokSettings, PersonaConfig};
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -257,44 +258,111 @@ pub async fn execute_chat_completion(
     Err("Resposta da API não contém conteúdo legível.".to_string())
 }
 
-/// Executa a resposta autônoma da Persona ativa
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ChatCompletionToolResponse {
+    pub message: Value,
+    pub tool_calls: Option<Vec<Value>>,
+}
+
+/// Executa chamada à API passando histórico completo de mensagens e as ferramentas registradas
+pub async fn execute_chat_completion_with_tools(
+    byok: &ByokSettings,
+    messages: &[Value],
+    tools: Option<Value>,
+    temperature: f32,
+    max_tokens: u32,
+) -> Result<ChatCompletionToolResponse, String> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|e| format!("Falha ao criar cliente HTTP: {}", e))?;
+
+    let mut url = byok.endpoint.trim().trim_end_matches('/').to_string();
+    if !url.ends_with("/chat/completions") {
+        url.push_str("/chat/completions");
+    }
+
+    let mut payload = serde_json::json!({
+        "model": byok.model,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": false,
+        "messages": messages,
+    });
+
+    if let Some(t) = tools {
+        // Assume que 'tools' é um Array Value no padrão OpenAI
+        payload.as_object_mut().unwrap().insert("tools".to_string(), t);
+    }
+
+    log::info!("[LLM Client] 📡 POST {} (Com Tools) | model={} | max_tokens={}", url, byok.model, max_tokens);
+
+    let mut request = client.post(&url)
+        .header("Content-Type", "application/json");
+
+    if !byok.api_key.trim().is_empty() {
+        request = request.header("Authorization", format!("Bearer {}", byok.api_key.trim()));
+    }
+
+    let response = request
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("Erro de rede ao conectar à LLM: {}", e))?;
+
+    let status = response.status();
+    let raw_body = response.text().await.unwrap_or_default();
+
+    if !status.is_success() {
+        log::error!("[LLM Client] ❌ Erro da API ({status}): {}", raw_body);
+        return Err(format!("Erro da API ({status}): {}", raw_body));
+    }
+
+    let res_json = serde_json::from_str::<Value>(&raw_body)
+        .map_err(|_| format!("Falha ao parsear JSON da resposta: {}", raw_body))?;
+
+    let message_obj = res_json["choices"][0]["message"].clone();
+    
+    if message_obj.is_null() {
+        return Err("Resposta da API não contém 'message' em 'choices[0]'.".to_string());
+    }
+
+    let tool_calls = message_obj["tool_calls"].as_array().cloned();
+
+    Ok(ChatCompletionToolResponse {
+        message: message_obj,
+        tool_calls,
+    })
+}
+
 pub async fn execute_persona_completion(
     byok: &ByokSettings,
     persona: &PersonaConfig,
     user_prompt: &str,
+    app_handle: Option<tauri::AppHandle>,
 ) -> Result<String, String> {
     log::info!(
-        "[LLM Client] 🚀 Enviando para Persona: '{}' | Modelo: {} | Endpoint: {}",
+        "[LLM Client] 🔄 Acionando Harness para Persona: '{}' | Modelo: {} | Endpoint: {}",
         persona.name,
         byok.model,
         byok.endpoint
     );
 
-    // Notifica a LLM de que a interface (popup e overlay) suporta Markdown completo
-    let markdown_instruction = "\n\nINSTRUÇÃO DE FORMATAÇÃO: A interface do usuário (tanto o popup flutuante quanto o overlay HUD) renderiza Markdown completo com suporte nativo a negrito (**texto**), itálico (*texto*), listas, blocos de código com linguagem (```linguagem), código inline (`código`), tabelas e links. Formate suas respostas em Markdown limpo e estruturado sempre que enriquecer a clareza e síntese da informação.";
-
-    let mut effective_system_prompt = persona.system_prompt.clone();
-    if !effective_system_prompt.to_lowercase().contains("markdown completo") {
-        effective_system_prompt.push_str(markdown_instruction);
-    }
-
-    log::info!(
-        "[LLM Client] 📝 System prompt: {} chars | User prompt: {} chars",
-        effective_system_prompt.len(),
-        user_prompt.len()
-    );
-
-    let result = execute_chat_completion(
+    // Repassa a chamada para o novo motor autônomo de loop (Harness)
+    let result = crate::agent::harness::run_harness_loop(
         byok,
-        &effective_system_prompt,
+        persona,
         user_prompt,
-        persona.temperature,
-        400,
+        app_handle.clone(),
     ).await;
 
     match &result {
-        Ok(reply) => log::info!("[LLM Client] ✅ Persona respondeu ({} chars): {:?}", reply.len(), &reply.chars().take(120).collect::<String>()),
-        Err(e)    => log::error!("[LLM Client] ❌ Persona FALHOU: {}", e),
+        Ok(reply) => log::info!("[LLM Client] ✅ Harness finalizado ({} chars): {:?}", reply.len(), &reply.chars().take(120).collect::<String>()),
+        Err(e)    => log::error!("[LLM Client] ❌ Harness FALHOU: {}", e),
+    }
+
+    if let Some(app) = app_handle {
+        let _ = app.emit("tool_finished", serde_json::json!({}));
     }
 
     result

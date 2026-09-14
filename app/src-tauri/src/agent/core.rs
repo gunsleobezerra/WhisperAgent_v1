@@ -13,6 +13,7 @@ pub struct PersonaConfig {
     pub trigger_mode: String,
     pub hotword: String,
     pub enabled_tools: Vec<String>,
+    pub auto_approve_tools: Vec<String>, // [NOVO] Ferramentas que não exigem Human-in-the-Loop
     pub temperature: f32,
     pub is_preset: bool,
 }
@@ -26,7 +27,8 @@ impl Default for PersonaConfig {
             system_prompt: "Você é um assistente pessoal ultra conciso exibido em um HUD flutuante no Windows. Sua missão é responder à fala transcrita do usuário com o máximo de precisão e brevidade possível (máximo de 2 a 3 frases curtas). O popup e o overlay suportam renderização de Markdown completo (negrito, listas, blocos de código). Nunca enrole, não use saudações longas e responda sempre em Português do Brasil.".to_string(),
             trigger_mode: "hotword".to_string(),
             hotword: "copiloto".to_string(),
-            enabled_tools: vec!["popup".to_string(), "clipboard".to_string()],
+            enabled_tools: vec!["show_popup".to_string(), "web_search".to_string(), "execute_command".to_string()],
+            auto_approve_tools: vec!["show_popup".to_string(), "web_search".to_string()], // Execute command requires approval by default
             temperature: 0.5,
             is_preset: true,
         }
@@ -74,6 +76,20 @@ pub static BYOK_SETTINGS: Lazy<Arc<RwLock<ByokSettings>>> =
 
 pub static LLM_CORRECTION_ENABLED: Lazy<Arc<RwLock<bool>>> =
     Lazy::new(|| Arc::new(RwLock::new(true)));
+
+pub static TRANSCRIPTION_LANGUAGE: Lazy<Arc<RwLock<String>>> =
+    Lazy::new(|| Arc::new(RwLock::new("pt".to_string())));
+
+pub fn get_transcription_language() -> String {
+    TRANSCRIPTION_LANGUAGE.read().map(|v| v.clone()).unwrap_or_else(|_| "pt".to_string())
+}
+
+pub fn set_transcription_language(lang: String) {
+    if let Ok(mut lock) = TRANSCRIPTION_LANGUAGE.write() {
+        *lock = lang.clone();
+        log::info!("[Agent Core] Idioma de transcrição definido para: {}", lang);
+    }
+}
 
 pub static MIN_CHARS_TO_TRIGGER: Lazy<Arc<RwLock<usize>>> =
     Lazy::new(|| Arc::new(RwLock::new(20)));
@@ -340,6 +356,7 @@ pub fn evaluate_transcription(app_handle: &AppHandle, raw_text: &str, segment_id
             &byok,
             &persona_clone,
             &enriched_prompt,
+            Some(handle.clone()),
         ).await {
             Ok(reply) => {
                 let trimmed = reply.trim();

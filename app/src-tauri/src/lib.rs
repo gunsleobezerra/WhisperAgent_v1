@@ -504,6 +504,7 @@ fn update_settings_state(
     audio_mute: Option<bool>,
     active_source_id: Option<String>,
     transcription_mode: Option<String>,
+    transcription_language: Option<String>,
     _ui_theme: Option<String>,
     _overlay_opacity: Option<u32>,
     _overlay_monitor_id: Option<u32>,
@@ -522,6 +523,9 @@ fn update_settings_state(
     }
     if let Some(mode) = transcription_mode {
         log::info!("[Settings Backend] Modo de transcrição definido: {}", mode);
+    }
+    if let Some(lang) = transcription_language {
+        agent::core::set_transcription_language(lang);
     }
     if let Some(corr) = llm_correction_enabled {
         agent::core::set_llm_correction_enabled(corr);
@@ -542,7 +546,17 @@ pub fn run() {
                         file_name: Some("whisper_agent".into()),
                     }),
                 ])
-                .level(log::LevelFilter::Info)
+                .level(
+                    std::env::var("RUST_LOG")
+                        .map(|v| match v.to_lowercase().as_str() {
+                            "debug" => log::LevelFilter::Debug,
+                            "trace" => log::LevelFilter::Trace,
+                            "warn" => log::LevelFilter::Warn,
+                            "error" => log::LevelFilter::Error,
+                            _ => log::LevelFilter::Info,
+                        })
+                        .unwrap_or(log::LevelFilter::Info)
+                )
                 .build(),
         )
         .setup(|app| {
@@ -735,6 +749,9 @@ pub fn run() {
             set_min_chars_to_trigger,
             set_popups_enabled,
             get_popups_enabled,
+            agent::mcp_config::get_mcp_servers,
+            agent::mcp_config::save_mcp_server,
+            agent::mcp_config::delete_mcp_server,
             open_browser_url
         ])
         .run(tauri::generate_context!())

@@ -27,12 +27,18 @@ use once_cell::sync::Lazy;
 static CURRENT_MODEL: Lazy<Arc<Mutex<String>>> = Lazy::new(|| Arc::new(Mutex::new("tiny-q5_1".to_string())));
 
 static WHISPER_CTX: Lazy<Arc<Mutex<Option<WhisperContext>>>> = Lazy::new(|| {
+    let large_v3_path = super::setup::model_path_for("large-v3");
+    let large_v3_q5_path = super::setup::model_path_for("large-v3-q5_0");
     let tiny_q5_path = super::setup::model_path_for("tiny-q5_1");
     let base_q5_path = super::setup::model_path_for("base-q5_1");
     let tiny_path = super::setup::model_path_for("tiny");
     let base_path = super::setup::model_path_for("base");
 
-    let (chosen_model, model_path) = if tiny_q5_path.exists() {
+    let (chosen_model, model_path) = if large_v3_path.exists() {
+        ("large-v3", large_v3_path)
+    } else if large_v3_q5_path.exists() {
+        ("large-v3-q5_0", large_v3_q5_path)
+    } else if tiny_q5_path.exists() {
         ("tiny-q5_1", tiny_q5_path)
     } else if base_q5_path.exists() {
         ("base-q5_1", base_q5_path)
@@ -132,7 +138,9 @@ pub fn transcribe_audio_buffer(audio_samples: &[f32], is_partial: bool) -> Strin
     }; // Lock liberado aqui! Múltiplas threads não disputam o contexto.
 
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-    params.set_language(Some("pt"));
+    let lang = crate::agent::core::get_transcription_language();
+    let lang_str = if lang == "auto" { Some("auto") } else { Some(lang.as_str()) };
+    params.set_language(lang_str);
     params.set_print_special(false);
     params.set_print_progress(false);
     params.set_print_realtime(false);
@@ -183,6 +191,10 @@ pub async fn set_whisper_model(
         "tiny-q5_1"
     } else if lower.contains("base") && lower.contains("q5") {
         "base-q5_1"
+    } else if lower.contains("large") && lower.contains("q5") {
+        "large-v3-q5_0"
+    } else if lower.contains("large") {
+        "large-v3"
     } else if lower.contains("base") {
         "base"
     } else {
@@ -221,6 +233,10 @@ pub async fn init_whisper_engine(
         "tiny-q5_1"
     } else if lower.contains("base") && lower.contains("q5") {
         "base-q5_1"
+    } else if lower.contains("large") && lower.contains("q5") {
+        "large-v3-q5_0"
+    } else if lower.contains("large") {
+        "large-v3"
     } else if lower.contains("base") {
         "base"
     } else {
