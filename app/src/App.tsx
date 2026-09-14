@@ -6,6 +6,7 @@ import { SettingsWindow } from './components/SettingsWindow';
 import { LiveOverlay } from './components/LiveOverlay';
 import { PopupWindow } from './components/PopupWindow';
 import { SessionSummaryWindow } from './components/SessionSummaryWindow';
+import { LogViewerWindow } from './components/LogViewerWindow';
 import { ThemeConfig, applyThemeToDom, getStoredTheme } from './utils/theme';
 import './App.css';
 
@@ -51,6 +52,10 @@ function App() {
 
   if (currentWindow === 'session-summary') {
     return <SessionSummaryWindow />;
+  }
+
+  if (currentWindow === 'logs') {
+    return <LogViewerWindow />;
   }
 
   return <LiveOverlay />;

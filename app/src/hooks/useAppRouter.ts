@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 
-export type AppWindow = 'settings' | 'overlay' | 'popup' | 'session-summary';
+export type AppWindow = 'settings' | 'overlay' | 'popup' | 'session-summary' | 'logs';
 
 function getInitialWindow(): AppWindow {
   try {
@@ -16,10 +16,16 @@ function getInitialWindow(): AppWindow {
     if (winParam === 'session-summary') {
       return 'session-summary';
     }
+    if (winParam === 'logs') {
+      return 'logs';
+    }
   } catch {}
 
   try {
     const label = getCurrentWindow().label;
+    if (label === 'logs') {
+      return 'logs';
+    }
     if (label === 'main' || label === 'settings') {
       return 'settings';
     }

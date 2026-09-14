@@ -164,7 +164,7 @@ pub fn rolling_summarizer_worker(
 fn format_fallback_summary(text: &str) -> String {
     let clean = text.trim();
     if clean.is_empty() {
-        return "- [Nenhum ponto relevante registrado]".to_string();
+        return "Nenhum ponto relevante registrado.".to_string();
     }
 
     let sentences: Vec<&str> = clean
@@ -174,14 +174,11 @@ fn format_fallback_summary(text: &str) -> String {
         .collect();
 
     if sentences.is_empty() {
-        return format!("- {}", clean.chars().take(160).collect::<String>());
+        return clean.chars().take(250).collect::<String>();
     }
 
-    let mut bullets = Vec::new();
-    for sentence in sentences.iter().take(4) {
-        bullets.push(format!("- {}", sentence));
-    }
-    bullets.join("\n")
+    // Apenas junta as sentenças com pontos finais para um texto fluido
+    sentences.join(". ") + "."
 }
 
 async fn summarize_text(byok: &ByokSettings, text: &str) -> Result<String, String> {
@@ -190,15 +187,15 @@ async fn summarize_text(byok: &ByokSettings, text: &str) -> Result<String, Strin
         return Ok(format_fallback_summary(text));
     }
 
-    let system_prompt = "Você é um assistente de síntese de contexto. \
-Recebe blocos de transcrição de áudio e extrai os fatos, tópicos e informações \
-essenciais em bullet points concisos em Português do Brasil. \
+    let system_prompt = "Você é um arquivista de memória de IA altamente qualificado. \
+Sua função é ler blocos fragmentados de transcrição de áudio e anotações do sistema, e \
+reescrevê-los em um único parágrafo de texto corrido (prosa), que seja coeso, fluido e extremamente claro. \
 REGRAS: \
-(1) Máximo de 4 bullet points por bloco. \
-(2) Preserve nomes próprios, números e termos técnicos exatamente. \
-(3) Não adicione comentários, introduções ou conclusões. \
-(4) Use formato: '- [fato ou tópico]'. \
-(5) Se o texto for muito curto ou irrelevante, sintetize a essência do que foi dito.";
+(1) NÃO use bullet points ou listas. Escreva um parágrafo narrativo contínuo. \
+(2) Extraia a verdadeira essência, decisões importantes, intenções do usuário e tópicos discutidos. \
+(3) Preserve estritamente nomes próprios, números, datas, termos técnicos e comandos exatos. \
+(4) Escreva sempre em Português do Brasil (PT-BR) de forma direta e objetiva, sem floreios, sem introduções (ex: 'O usuário disse que...') e sem conclusões genéricas. \
+(5) O texto final deve servir como uma memória perfeita de longo prazo para um agente autônomo ler no futuro.";
 
     let user_prompt = format!("Transcrição:\n{}", text);
 

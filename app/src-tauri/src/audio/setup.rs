@@ -75,7 +75,7 @@ pub fn download_model_if_needed(app: &AppHandle, name: &str) -> Result<PathBuf, 
     let cfg = get_model_config(name);
     let path = model_path_for(name);
 
-    if path.exists() && path.metadata().map(|m| m.len()).unwrap_or(0) > (cfg.size_bytes / 2) {
+    if path.exists() && path.metadata().map(|m| m.len()).unwrap_or(0) > (cfg.size_bytes * 95 / 100) {
         log::info!("[Whisper Setup] Modelo '{}' já existe localmente: {:?}", cfg.filename, path);
         let _ = app.emit("whisper_model_download", DownloadEvent {
             id: name.to_string(),

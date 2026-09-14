@@ -20,6 +20,42 @@ use agent::core::HOT_BUFFER_REF;
 
 
 #[tauri::command]
+async fn request_open_logs(app: tauri::AppHandle) -> Result<(), String> {
+    log::info!("[Window Manager] >> Solicitada abertura da Janela de Logs");
+    if let Some(window) = app.get_webview_window("logs") {
+        let _ = window.set_shadow(false);
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    } else {
+        let builder = tauri::WebviewWindowBuilder::new(
+            &app,
+            "logs",
+            tauri::WebviewUrl::App("index.html?window=logs".into()),
+        )
+        .title("WhisperAgent - Realtime Logs")
+        .inner_size(800.0, 600.0)
+        .min_inner_size(500.0, 400.0)
+        .resizable(true)
+        .transparent(true)
+        .always_on_top(false)
+        .decorations(true)
+        .shadow(true)
+        .center();
+
+        match builder.build() {
+            Ok(w) => {
+                let _ = w.set_focus();
+            }
+            Err(e) => {
+                log::error!("[Window Manager] Falha ao criar janela de logs: {}", e);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
 async fn request_open_settings(app: tauri::AppHandle) -> Result<(), String> {
     log::info!("[Window Manager] >> Solicitada abertura da Janela de Configurações");
     if let Some(window) = app.get_webview_window("main") {
@@ -541,6 +577,8 @@ pub fn run() {
         .plugin(
             tauri_plugin_log::Builder::new()
                 .targets([
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Webview),
                     tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Folder {
                         path: std::path::PathBuf::from("."),
                         file_name: Some("whisper_agent".into()),
@@ -713,6 +751,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            request_open_logs,
             request_open_settings,
             hide_settings,
             request_open_session_summary,

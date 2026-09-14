@@ -8,6 +8,7 @@ import {
   Pause,
   Play,
   Settings,
+  Terminal,
   X,
   Sparkles,
   Mic,
@@ -651,6 +652,14 @@ export function LiveOverlay() {
     }
   };
 
+  const handleOpenLogs = async () => {
+    try {
+      await invoke('request_open_logs');
+    } catch (err) {
+      console.error('Erro ao abrir logs:', err);
+    }
+  };
+
   const handleOpenSettings = async () => {
     try {
       await invoke('request_open_settings');
@@ -812,6 +821,14 @@ export function LiveOverlay() {
             title="Ver Sumário da Sessão & ID (Memória consolidada)"
           >
             <FileText size={13} />
+          </button>
+          <button 
+            type="button"
+            className="overlay-icon-btn"
+            onClick={handleOpenLogs}
+            title="Logs do Backend"
+          >
+            <Terminal size={13} />
           </button>
           <button 
             type="button"

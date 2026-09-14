@@ -16,22 +16,30 @@ pub async fn execute(parameters: &Value, app_handle: Option<tauri::AppHandle>) -
     }
 
     let client = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| e.to_string())?;
 
-    let url = "https://lite.duckduckgo.com/lite/";
-    let res = client.post(url)
-        .form(&[("q", query)])
+    let url = "https://www.bing.com/search";
+    let res = client.get(url)
+        .query(&[("q", query)])
         .send()
         .await
         .map_err(|e| format!("Falha na requisição web: {}", e))?;
 
     let html = res.text().await.unwrap_or_default();
     
-    // Scraper ultra-simples para o DuckDuckGo Lite usando Regex básico
-    // Extrai o texto cru removendo tags de forma bruta para manter no limite de contexto.
-    let clean_text = html.replace("<", " <").replace(">", "> ");
+    let mut main_content = html.as_str();
+    if let Some(start) = main_content.find("<ol id=\"b_results\"") {
+        if let Some(end) = main_content[start..].find("</ol>") {
+            main_content = &main_content[start..start+end];
+        } else {
+            main_content = &main_content[start..];
+        }
+    }
+
+    let clean_text = main_content.replace("<", " <").replace(">", "> ");
     let mut extracted = String::new();
     let mut in_tag = false;
     
